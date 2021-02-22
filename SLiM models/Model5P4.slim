@@ -1,0 +1,334 @@
+// Model 5 expands Model 4 to five populations each with its unique environmental optimum, along a cline, and with connectivity defined by a matrix (stepping stone, as in Model 3, as a most simple solution). Local adaptation happens readily despite connectivity, while standing genetic variation remains high in the metapopulation for hundreds of generations. If the environments are stable (no temporal or spatial variation) over thousands of generation, and assuming no new mutations, most of the genetic variation disappears due to fixation, and only a small subset of QTLs remain ‘active’ (i.e., not fixed or lost) - just enough to define the environmental range of the metapopulation (i.e., 10 QLTs * 2 copies * 0.01 effect = 0.2 phenotypic difference between population 1 and 5). If we impose a change in the environmental optimum (shifting it by 0.001 unit per generation, mimicking warming for example) while standing genetic variation is still high (e.g. at generation 1,000), all populations react instantaneously and adapt to the new norm. The large number of QTLs equip the populations with a huge adaptive capacity. In contrast, if we impose a similar change in the environment at generation 10,000 when there are only 10 unfixed QTLs in the metapopulation, the warmest population will soon run out of adaptive capacity (becomes fixed for all QTLs). The only way to ‘rescue’ such populations is by introducing novel genetic variation, see Model 4. Note that the more southern populations still have some room for adaptation via the 10 active QTLs, and any introduction of ‘supercorals’ homozygous to all QTLs (except the ones lost form the metapopulation) will yield negligible results, see Model 4. This is because they already track the phenotypic optimum closely via the existing genetic variation and immigration.
+
+// In this model, interventions are made on Population 4 (i.e., one population polewards from the central population along the latitudinal gradient)
+
+// There are a number of parameters commented out in the below script, these are the variables that were manipulated via bash and R codes for testing the parameter space of the model
+
+initialize() {
+	
+	//setwd("/Users/jc205026/SLIM/PA101");
+	defineConstant("folder", "Model5P4");
+	//defineConstant("no", 1);
+	setSeed(no);
+	//defineConstant('burnin', 100);
+	defineConstant('end', burnin+300);
+	
+	//POPULATION SPECS
+	//defineConstant("K", 1000); //population size
+	defineConstant("N", 5);     // number of subpopulations
+	//defineConstant("MS", 0.01);     // migration rate southwards
+	defineConstant("MN", MS/2);     // migration rate northhwards
+	
+	//ENVIRONMENTAL SPECS
+	defineConstant("LabTemp", 1.0); // environmental optimum of lab
+	defineConstant("opt", c(seq(1.1, 0.9, length = N), LabTemp)); //environmental optimum at each population, last value is the temp at the lab
+	//defineConstant("range", c(sample(0, N, replace = T), 0)); //range of environmental values, last value is for the lab
+	
+	//ENVIRONMENTAL VARIABILITY IN TIME
+	defineConstant("deltaTemp", rep(0.01, 6));// temperature change per generation at each population ("Heron-curves"), last value is for the lab. Here we use identical value for each population
+	defineConstant("TW0", burnin+100); // beginning of warming
+	defineConstant("TW1", TW0+150); // end of warming 150 generations later
+	//defineConstant("EN", 0); // is there El Nino? 0: yes, number higher than end: no
+	defineConstant("TEN0", burnin+EN); // beginning of El Nino ramping
+	defineConstant("TEN1", TEN0+100+EN); // end of El Nino ramping
+	defineConstant("amp", 0.1); // amplitude of El nino
+	defineConstant("sine", amp * sin(2/5*PI*0:5)); // simple El Nino approximation, sine wave with period of 5 years, amplitude 1
+	// For a more realistic EL Nino epproximation, see ElNino.R script
+	
+	//INTERVENTION
+	//defineConstant("aIoC", 50); // at which generation following warming is intervention deployed
+	defineConstant("IoC", TW0+aIoC); // Intervention o'Clock
+	//defineConstant("IM", 1); // Intervention options: 1. Crossing the extreme populations; 2. Selective breeding by A) reshuffling existing genetic variation, and B) also adding new genetic variation 	
+	//defineConstant("I", 0.5); // inocculum ratio to K
+	//defineConstant("S", 100); // number of parents in lab, only valud for IM = 1
+	
+	
+	//GENOME
+	//defineConstant("WoFF",0.1 + range/100);	// Width of fitness function (encapsulates phenotypic plasticity, environmental tolerance envelope of individuals, as well as the environmental envelope of the location)
+	//defineConstant('me', 0.01); // mutation effect (uniform for all loci in this model)
+	//defineConstant('mr', 0); // mutation rate
+	//defineConstant("U", 100); // number of original QTLs
+	//defineConstant("AGV", 40); // number of loci as 'added genetic variation'
+	defineConstant("Q", asInteger(U+AGV));				// number of QTLs (original plus added genetic variation)
+	initializeMutationRate(mr);
+	initializeMutationType("m1", 0.5, "f", me);		// thermal QTL with fixed mutation effect (for demo)
+	initializeGenomicElementType("g1", m1, 1.0);
+	initializeGenomicElement(g1,0,asInteger(Q-1));
+	initializeRecombinationRate(0.5);
+	m1.convertToSubstitution =F;
+	m1.mutationStackPolicy = "s";
+	
+	//OUTPUTS
+	defineConstant("id", asString('K' + K + '_burnin' + burnin + '_EN' + EN + '_aIoC' + aIoC + '_IM' + IM + '_I' + I + '_S' + S + '_U' + U + '_AGV' + +AGV + '_MS' + MS + '_me' + me + '_mr' + mr + '_WoFF' + WoFF +"_" + no));
+	
+	defineConstant("outSumFile",	"./"+folder+"/sum_"+ id + ".csv");
+	outHeader = "Generation" + "," + "Population" + ", "  + "Optimum" + ", "  + "Climate" + ", "  + "Popsize" + ", " + "Phenotype" + "," + "sdPhenotype" + "," + "Mismatch" + ", " + "Fitness" + ", " + "sdFitness" + ", " + "id";
+	writeFile(outSumFile, outHeader, append=F);
+	
+	defineConstant("outParamFile",	"./"+folder+"/param_"+ id + ".csv");
+	paramHeader = 'K' + ', ' + 'burnin' + ', ' + 'EN' + ', ' + 'aIoC' + ', ' + 'IM' + ', ' + 'I' + ', ' + 'S' + ', ' + 'U' + ', ' + 'AGV' + ', ' + 'MS' + ', ' + 'me' + ', ' + 'mr' + ', ' + 'WoFF' + ", " + "no" + ", " + "id";
+	writeFile(outParamFile, paramHeader, append=F);
+	outParamLine = K + ', ' + burnin + ', ' + EN + ', ' + aIoC + ', ' + IM + ', ' + I + ', ' + S + ', ' + U + ', ' + AGV + ', ' + MS + ', ' + me + ', ' + mr + ', ' + WoFF + ", " + no + ", " + id;
+	writeFile(outParamFile, outParamLine, append=T);
+	
+	defineConstant("outMutsFile",	"./"+folder+"/muts_"+ id + ".csv");
+	mutsHeader = "Generation" + "," + "Population" + ", "  + "Popsize" + ", " + paste((rep("M", Q) + 1:Q), sep = ", ") + ", " + "id";
+	writeFile(outMutsFile, mutsHeader, append=F);
+	
+	//defineConstant("outIndsFile",	"./"+folder+"/inds_"+ id + "_" + no + ".csv");
+	//indsHeader = "Generation" + ", "  + "Population" + ", " + "Mismatch" + ", " + "Phenotype" + ", "  + "Phenofitness" + ", " + "id";
+	//writeFile(outIndsFile, indsHeader, append=F);
+}
+
+fitness(m1) {return 1.0;}   // make QTLs intrinsically neutral
+
+1 early () {
+	for (n in 1:N)
+		sim.addSubpop(n, K);
+	subpop = sim.subpopulations;
+	catn(U + ", " + AGV);
+	catn(id);
+	//IF WE WANT A MIGRTATION MATRIX
+	//	lines = readFile("./migMat.csv");
+	//	for (line in lines)
+	//	{
+	//		fields = strsplit(line, ",");
+	//		i = asInteger(fields[0]);
+	//		j = asInteger(fields[1]);
+	//		m = asFloat(fields[2]);
+	//		if (i != j)
+	//		{
+	//			p_i = subpop[subpop.id == i];
+	//			p_j = subpop[subpop.id == j];
+	//			p_j.setMigrationRates(p_i, m);
+	//		}
+	//	}
+	
+	// IF WE JUST WANT A STEPPING STONE...
+	for (i in 2:N)
+		sim.subpopulations[i-1].setMigrationRates(i-1, MS);
+	for (i in 1:(N-1))
+		sim.subpopulations[i-1].setMigrationRates(i+1, MN);
+	
+	//SETTING UP ALL THE MUTATIONS IN THE FIRST GENERATION
+	// create all mutations in a genome in a dummy subpopulation
+	sim.addSubpop("p6", 1);
+	mutsAll = p6.genomes[0].addNewDrawnMutation(m1, 0:asInteger(Q-1));
+	// save mutations for later generations
+	//p6.genomes[0].outputMS("./Model5/mutsAll.txt");
+	// remove the dummy subpopulation
+	p6.setSubpopulationSize(0);
+	
+	// everyone has U loci with a phenotype of 1.0 (middle of the 0.9-1.1 range)
+	
+	muts1 = mutsAll[0:asInteger(U-1)];
+	sim.subpopulations.individuals.genome1.addMutations(muts1);
+	
+	
+//	//Make sure that in the lab only hybrid crosses are produced
+	if (IM == 1) {
+		sim.registerMateChoiceCallback(id = 's1', source = "{if (sim.generation == IoC) {matesvector = ifelse(p6.individuals.tag != individual.tag, 1.0, 0.0); return matesvector;} return weights; }", subpop = 6, start = IoC, end = IoC+1);
+		sim.registerModifyChildCallback(id = 's2', source = "{child.tag = sourceSubpop.id;return T;}", start = IoC-1, end = IoC-1);
+	}
+}
+
+//INTERVENTION O'CLOCK
+2: early () {
+	//FIRST METHOD: CROSSING THE EXTREME POPULATIONS
+	//sim.subpopulations.individuals.tag = sim.subpopulations.individuals.subpopulation.id;
+	
+	if (IM == 1) {
+		//SOURCING PARENT COLONIES FOR AQUARIA
+		if (sim.generation == IoC-1) {
+			sim.addSubpop('p6', S);
+			p6.setMigrationRates(c(p1, p5), c(0.5,0.5));
+		}
+		
+		if (sim.generation == IoC) {
+			//catn(p4.individuals.tag + '\n');
+			//catn();
+		}
+		
+		//WATCHING WHAT HAPPENS
+		if (sim.generation == IoC+10) {
+			p6.setSubpopulationSize(0);
+		}
+	}
+}
+
+2: late () {
+	//OUTPLANTING INOCULUM in IM=1
+	if (IM == 1) {
+		if (sim.generation == IoC-1) {
+			p6.setMigrationRates(c(p1, p5), c(0, 0));
+			p4.setMigrationRates(p6, I);
+		}
+		if (sim.generation == IoC) {
+			p4.setMigrationRates(p6, 0);
+		}
+	}
+	
+	
+	// SECOND METHOD: WE ADD SELECTIVELY BRED INDIVIDUALS that perfectly match the environment in pop 3	
+	if (IM == 2) {
+		
+		if (sim.generation == IoC) {
+			Warming = (sim.generation < TW0) ? 0
+				else (sim.generation < TW1) ? (sim.generation-TW0) * deltaTemp[2]
+				else (TW1 - TW0) * deltaTemp[2];
+			
+			optp4 = opt[3]+ Warming;
+			
+			mutsAll = unique(sim.subpopulations.genomes.mutations);
+			
+			mutsNeed = optp4/me;
+			
+			if (size(mutsAll) < mutsNeed) {
+				if (2*size(mutsAll) + AGV < mutsNeed ) {
+					he = 0;
+					ho = U;
+				} else {
+					he = (2*size(mutsAll) - mutsNeed + AGV);
+					ho = size(mutsAll)-he;
+				}
+			}
+			if (size(mutsAll)+AGV >= mutsNeed) { /// is this the only else there is?
+				he = mutsNeed - AGV;
+				ho = 0;
+			}
+			
+			//catn(he + ", " + ho);
+			target = sample(p4.individuals, asInteger(I*K));
+			target.genomes.removeMutations();
+			
+			
+			if (he > 0) {
+				muts1 = mutsAll[0:asInteger(he-1)];
+				target.genome1.addMutations(muts1); // heterozygous loci
+			}
+			
+			if (ho > 0) {
+				muts2 = mutsAll[he:asInteger(he+ho-1)];
+				target.genomes.addMutations(muts2); // homozygous loci
+			}
+			//catn(target.sumOfMutationsOfType(m1));
+			if (AGV > 0)
+				target.genome1.addNewDrawnMutation(m1, asInteger(U):asInteger(U+AGV-1)); // new loci, aka GMO or assisted translocation
+			//catn(target.sumOfMutationsOfType(m1));
+		
+		}
+	}
+}
+
+
+late () {
+	
+	subpop = sim.subpopulations;
+	
+	// El Nino conditions 
+	phase = sim.generation % 5;
+	ElNino = (sim.generation < TEN0) ? 0
+		else (sim.generation < TEN1) ?
+		sine[phase]*((sim.generation - TEN0)/(TEN1 - TEN0))
+		else sine[phase];
+	
+	subpop.setValue('ElNino', ElNino);
+	//catn('\n' + 'Generation ' + sim.generation);
+	// Warming varying with subpopulation
+	for (s in subpop) {
+		inds = s.individuals;
+		
+		Warming = (sim.generation < TW0) ? 0
+			else (sim.generation < TW1) ? (sim.generation-TW0) * deltaTemp[s.id-1]
+			else (TW1 - TW0) * deltaTemp[s.id-1];
+		
+		Climate = ElNino + Warming;
+		
+		subpop.setValue('Warming', Warming);
+		subpop.setValue('Climate', Climate);
+		
+		//catn('Popoulation ' + s.id + " - El Nino: " + ElNino + "   Warming: " + Warming + "   Climate: " + Climate);
+		
+		// QTL-based fitness varying with subpopulation
+		phenotype = inds.sumOfMutationsOfType(m1);
+		optimum = opt[s.id-1]; // local phenotype optimum
+		mismatch = abs(optimum + Climate - phenotype);
+		phenoFitness = dnorm(mismatch, 0, WoFF) / dnorm(rep(0.0, length(mismatch)), 0, WoFF);
+		
+		//catn('Popoulation ' + s.id + ': WoFF = ' + WoFF[s.id-1]);
+		
+		inds.fitnessScaling = phenoFitness;
+		
+		inds.tagF = phenotype;   // just for output below
+		s.setValue("opti", optimum);
+		s.setValue("mPht", mean(phenotype));
+		s.setValue("sdPht", sd(phenotype));
+		s.setValue("mMis", mean(mismatch));
+		s.setValue("sdMis", sd(mismatch));
+		s.setValue("mPhf", mean(phenoFitness));
+		s.setValue("sdPhf", sd(phenoFitness));
+		//s.setValue("WoFF", WoFF);
+		//s.setValue("mCf", mean(s.cachedFitness(NULL)));
+		
+		//catn('Popoulation ' + s.id + ": mPht = " + mean(phenotype) + sd(phenotype) + ", mFit = " + mean(phenoFitness) + ", env = " + optimum);
+		
+		for (i in inds) {
+			i.setValue("pht", phenotype[i.index]);
+			i.setValue("mis", mismatch[i.index]);
+			i.setValue("phf", phenoFitness[i.index]);
+		}
+	}
+	
+	
+	
+	//OUTPUTS
+	inds = subpop.individuals;
+	
+	outSumLine = sim.generation + ", " + subpop.id + ", " + subpop.getValue("opti") + ", " + subpop.getValue("Climate") + ", " + subpop.individualCount + ", " + subpop.getValue("mPht") + ", " + subpop.getValue("sdPht") + ", " +subpop.getValue("mMis") + ", " + subpop.getValue("mPhf") + ", " + subpop.getValue("sdPhf") +  ", " + id;
+	writeFile(outSumFile, outSumLine, append=T);
+	
+	
+	if (any(sim.generation == c(burnin, IoC+(-1:5), IoC+10))) {//200, 250:260, 270, 280, 290, 300
+		//outIndsLine = sim.generation + ", "  + inds.subpopulation.id + ", " + inds.getValue("mis") + ", " + inds.getValue("pht") + ", " + inds.getValue("phf") + ", " + id;
+		//writeFile(outIndsFile, outIndsLine, append=T);
+		if (no == 1) {
+			subpop.individuals.genomes.outputVCF(paste0(c("./", folder, "/", id, "_G", sim.generation, ".vcf")));
+			
+			
+			//calculate nucleotide frequencies per population in certain generations
+			for (s in subpop) {
+				muts = s.genomes.mutations.position;
+				mutsLine = object();
+				for (n in 0:(Q-1)) { //for every QTL position count the number of cases where there is a mutation
+					nf = length(muts[muts == n]);
+					mutsLine = n == 0? nf else c(mutsLine, nf);
+				}
+				s.setValue("muts", paste0(asString(mutsLine + ",")));
+			}
+			outMutsLine = sim.generation + ", " + subpop.id + ", " + subpop.individualCount + ", " + subpop.getValue("muts") + id;
+			writeFile(outMutsFile, outMutsLine, append=T);
+		
+		}
+	}
+	if (sim.generation == end) {
+		catn("The END");
+		sim.simulationFinished();
+	}
+}
+
+1500 late() {
+	sim.simulationFinished();
+}
+
+
+
+
+
+
+
+
+
+
+
+
+

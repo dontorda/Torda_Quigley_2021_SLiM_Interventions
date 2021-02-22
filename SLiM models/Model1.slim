@@ -1,0 +1,58 @@
+// A codominant single locus model of one single population. The beneficial allele ‘A’ has a selection coefficient of 0.1. A population of 10,000 individuals naïve to the ‘A’ allele receives an inoculum of 100 Aa heterozygous individuals. The adaptive allele spreads rapidly and fixes, increasing the population fitness from 1.0 to 1.1, as expected.
+
+initialize() {
+	
+	setwd("/Users/jc205026/SLIM/PA101");
+	defineConstant("folder", "Model1");
+	//defineConstant("no", 1);
+	setSeed(no);
+	
+	//POPULATION SPECS
+	defineConstant("K", 10000); //population size
+	defineConstant("I", 100); // inoculum size
+	defineConstant("N", 1);     // number of subpopulations
+	
+	//GENOME
+	defineConstant("Q", 1);				// number of QTLs
+	
+	initializeMutationRate(0);
+	initializeMutationType("m1", 0.5, "f", 0.1);		// thermal QTL with fixed mutation effect (for demo)
+	initializeGenomicElementType("g1", m1, 1.0);
+	initializeGenomicElement(g1,0,asInteger(Q-1));
+	initializeRecombinationRate(0.5);
+	m1.convertToSubstitution =F;
+	m1.mutationStackPolicy = "l";
+	
+	//OUTPUTS
+	defineConstant("outSumFile",	"./"+folder+"/sum_"+ no + ".csv");
+	sumHeader = "Generation" + "," + "Fitness" + ", " + "sdFitness" + ", " + "Homozygotes" + ", " + "Heterozygotes" + ", " + "no";
+	writeFile(outSumFile, sumHeader, append=F);
+}
+
+// SET UP POPULATION AND INOCULUM
+1 early() {
+	sim.addSubpop("p1", 10000);
+	newGuys = sample(p1.individuals, I);
+	newGuys.genome1.addNewDrawnMutation(m1, 0);
+}
+
+// CALCULATE FITNESS
+early() {
+	iF = p1.cachedFitness(NULL);
+	p1.setValue("mF", mean(iF));
+	p1.setValue("sdF", sd(iF));
+	p1.setValue("homo", size(p1.individuals[p1.individuals.countOfMutationsOfType(m1) == 2]));
+	p1.setValue("hetero", size(p1.individuals[p1.individuals.countOfMutationsOfType(m1) == 1]));
+
+}
+
+late() {
+	//OUTPUTS
+	outSumLine = sim.generation + ", " + p1.getValue("mF") + ", " + p1.getValue("sdF") + ", " + p1.getValue("homo") + ", " + p1.getValue("hetero") + ", " + no;
+	writeFile(outSumFile, outSumLine, append=T);
+}
+
+
+300 late () {
+	sim.simulationFinished();
+}

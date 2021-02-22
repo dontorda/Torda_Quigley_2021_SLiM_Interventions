@@ -1,0 +1,67 @@
+// Multi-population version of Model 1. Here we have five populations with identical selection coefficient on the ‘A’ allele (ie. similar environment). We assume a migration rate of 0.01 one direction and 0.001 the opposite direction among neighbouring populations, representing a stepping-stone metapopulation model. Each population has 10,000 individuals, homozygous for the ‘a’ allele. We then introduce 100 individuals that are homozygous for the beneficial allele ‘A’ in population 1
+
+initialize() {
+	
+	setwd("/Users/jc205026/SLIM/PA101");
+	defineConstant("folder", "Model2");
+//	defineConstant("no", 1);
+	setSeed(no);
+	
+	//POPULATION SPECS
+	defineConstant("K", 10000); //population size
+	defineConstant("I", 100); // inoculum size
+	defineConstant("N", 5);     // number of subpopulations
+	
+	//GENOME
+	defineConstant("Q", 1);				// number of QTLs
+	
+	initializeMutationRate(0);
+	initializeMutationType("m1", 0.5, "f", 0.1);		// thermal QTL with fixed mutation effect (for demo)
+	initializeGenomicElementType("g1", m1, 1.0);
+	initializeGenomicElement(g1,0,asInteger(Q-1));
+	initializeRecombinationRate(0.5);
+	m1.convertToSubstitution =F;
+	m1.mutationStackPolicy = "l";
+	
+	//OUTPUTS
+	defineConstant("outSumFile",	"./"+folder+"/sum_"+ no + ".csv");
+	sumHeader = "Generation" + ", " + "Population" + "," + "Fitness" + ", " + "sdFitness" + ", " + "Homozygotes" + ", " + "Heterozygotes" + ", " + "no";
+	writeFile(outSumFile, sumHeader, append=F);
+}
+
+// SET UP POPULATIONS AND INOCULUM
+1 early() {
+	for (s in 1:N) {
+		sim.addSubpop(s, 10000);
+		newGuys = sample(p1.individuals, I);
+		newGuys.genome1.addNewDrawnMutation(m1, 0);
+	}
+	
+	for (i in 2:N)
+		sim.subpopulations[i-1].setMigrationRates(i-1, 0.01);
+	for (i in 1:(N-1))
+		sim.subpopulations[i-1].setMigrationRates(i+1, 0.005);
+}
+
+// CALCULATE FITNESS
+early() {
+	subpop = sim.subpopulations;
+	for (s in subpop) {
+		iF = s.cachedFitness(NULL);
+		s.setValue("mF", mean(iF));
+		s.setValue("sdF", sd(iF));
+		s.setValue("homo", size(s.individuals[s.individuals.countOfMutationsOfType(m1) == 2]));
+		s.setValue("hetero", size(s.individuals[s.individuals.countOfMutationsOfType(m1) == 1]));
+	}
+}
+
+late() {
+	subpop = sim.subpopulations;
+	//OUTPUTS
+	outSumLine = sim.generation + ", " + subpop.id + ", " + subpop.getValue("mF") + ", " + subpop.getValue("sdF") + ", " + subpop.getValue("homo") + ", " + subpop.getValue("hetero") + ", " + no;
+	writeFile(outSumFile, outSumLine, append=T);
+}
+
+300 late () {
+	sim.simulationFinished();
+}

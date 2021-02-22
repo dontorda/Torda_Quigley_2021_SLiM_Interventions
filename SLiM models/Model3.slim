@@ -1,0 +1,75 @@
+// Building on Model 2., this time each population has a different environmental condition, along a cline, representing a stepping stone model along a latitudinal gradient. The mutation that was beneficial in the northernmost population (population 1), will be less beneficial as we go southwards; in the central population (population 3) it is neutral and south of that it is increasingly detrimental. This is a scenario that mimics the latitudinal gradient of large ecosystems, for example coral reefs, and serves as a simplified demonstration of how ‘heat adapted’ genotypes are excluded by environmental filtering. 
+
+initialize() {
+	
+	setwd("/Users/jc205026/SLIM/PA101");
+	defineConstant("folder", "Model3");
+	//defineConstant("no", 1);
+	setSeed(no);
+	
+	//POPULATION SPECS
+	defineConstant("K", 10000); //population size
+	defineConstant("I", 100); // inoculum size
+	defineConstant("N", 5);     // number of subpopulations
+	defineConstant("cline", 0.05);     // environmental cline (difference in selective pressure among subsequent populations)
+
+	
+	//GENOME
+	defineConstant("Q", 1);				// number of QTLs
+	
+	initializeMutationRate(0);
+	initializeMutationType("m1", 0.5, "f", 0.1);		// thermal QTL with fixed mutation effect (for demo)
+	initializeGenomicElementType("g1", m1, 1.0);
+	initializeGenomicElement(g1,0,asInteger(Q-1));
+	initializeRecombinationRate(0.5);
+	m1.convertToSubstitution =F;
+	m1.mutationStackPolicy = "l";
+	
+	//OUTPUTS
+	defineConstant("outSumFile",	"./"+folder+"/sum_"+ no + ".csv");
+	sumHeader = "Generation" + ", " + "Population" + "," + "Fitness" + ", " + "sdFitness" + ", " + "Homozygotes" + ", " + "Heterozygotes" + ", " + "no";
+	writeFile(outSumFile, sumHeader, append=F);
+}
+
+// SET UP POPULATIONS AND INOCULUM
+1 early() {
+	for (s in 1:N) {
+		sim.addSubpop(s, 10000);
+		newGuys = sample(p1.individuals, I);
+		newGuys.genome1.addNewDrawnMutation(m1, 0);
+	}
+	
+	for (i in 2:N)
+		sim.subpopulations[i-1].setMigrationRates(i-1, 0.01);
+	for (i in 1:(N-1))
+		sim.subpopulations[i-1].setMigrationRates(i+1, 0.005);
+}
+
+// SELECTION COEFFICIENT IS DIFFERENT IN EACH POPULATION (0.1, 0.05 0 -0.05 -0.1)
+fitness(m1, p2) { return relFitness/(1+relFitness-(1.1-cline)); }
+fitness(m1, p3) { return relFitness/(1+relFitness-(1.1-cline*2)); }
+fitness(m1, p4) { return relFitness/(1+relFitness-(1.1-cline*3)); }
+fitness(m1, p5) { return relFitness/(1+relFitness-(1.1-cline*4)); }
+
+// CALCULATE FITNESS
+early() {
+	subpop = sim.subpopulations;
+	for (s in subpop) {
+		iF = s.cachedFitness(NULL);
+		s.setValue("mF", mean(iF));
+		s.setValue("sdF", sd(iF));
+		s.setValue("homo", size(s.individuals[s.individuals.countOfMutationsOfType(m1) == 2]));
+		s.setValue("hetero", size(s.individuals[s.individuals.countOfMutationsOfType(m1) == 1]));
+	}
+}
+
+late() {
+	subpop = sim.subpopulations;
+	//OUTPUTS
+	outSumLine = sim.generation + ", " + subpop.id + ", " + subpop.getValue("mF") + ", " + subpop.getValue("sdF") + ", " + subpop.getValue("homo") + ", " + subpop.getValue("hetero") + ", " + no;
+	writeFile(outSumFile, outSumLine, append=T);
+}
+
+1000 late () {
+	sim.simulationFinished();
+}

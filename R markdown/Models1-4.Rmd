@@ -1,0 +1,197 @@
+---
+title: "Models 1 to 4"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r loading libraries, , results='markdown', eval=TRUE, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(patchwork)
+library(scales)
+library(reshape2)
+theme_set(theme_bw()) 
+```
+  
+# Introduction  
+To illustrate the principles of genetic interventions for monogenic vs. polygenic traits, in isolated populations vs metapopulations, we created evolutionary models of Wright-Fischer (WF) populations in the evolutionary modelling framework SLiM 3.3. Despite their disconnect from reality, WF population models are extremely useful to demonstrate the principles of evolutionary processes due to their simplicity.  Importantly, WF models have been used widely in earlier modelling efforts, and we felt it was important to make our models relatable to this previous body of work. Starting from simple, working towards more complex models we demonstrate the fate of introduced alleles and haplotypes, and their impact on the fitness of the recipient populations or metapopulations. The models are built in a hierarchical manner with increasing complexity, i.e. each model builds on the machinery of the previous one, for cross comparison. The simpler models simulate textbook evolutionary scenarios. Model codes are archived on https://github.com/dontorda/  
+  
+# Model 1 - single gene, single population
+The simplest model is a codominant single locus model of one single population. The beneficial allele ‘A’ has a selection coefficient of 0.1. A population of 10,000 individuals naïve to the ‘A’ allele receives an inoculum of 100 AA homozygous individuals. The adaptive allele spreads rapidly and fixes within 250 generations, increasing the population fitness from 1.0 to 1.1.
+```{r Model 1, fig.fullwidth=TRUE, fig.dim= c(10, 5), cache = T, fig.cap="Supplementary Figure 1. Fixation of a beneficial mutation on one single locus in a population (Ten independent simulations shown)."}
+load("../Data/Model1.RData")
+
+P1<-ggplot(sumsM1, aes(Generation, Fitness)) +
+    #geom_ribbon(aes(ymin = Fitness - sdFitness, ymax = Fitness + sdFitness, fill = no), alpha = 0.05) +
+    geom_line(aes(group = no), alpha = 0.5) +
+    scale_y_continuous(breaks = pretty(x = seq(1, 1.1, by = 0.01))) +
+    ylab("Mean population fitness") +
+    theme(legend.position = 'none')
+
+P2<-ggplot(sumsM1, aes(Generation, HHr)) +
+    geom_line(aes(group=interaction(no, Heterozygocity), linetype = Heterozygocity), alpha = 0.5) +
+    scale_linetype_manual(values = c("dotted", "solid")) +
+    ylab("Proportion of heterozygotes vs. homozygotes") +
+    theme(legend.position = c(0.2,0.8), legend.title = element_blank())
+
+P2+P1
+ggsave("../Figures/S1.png", width = 10, height = 4, dpi = 300)
+```
+
+# Model 2 - single gene, multiple populations, uniform environment
+The next model is the multi-population version of Model 1. Here we have five populations with identical selection coefficient on the ‘A’ allele (i.e. similar environment). We assume a 1% migration rate from low to high population numbers (1 to 5), and 0.5% the opposite direction, among neighbouring populations, representing a stepping-stone metapopulation model. Each population has 10,000 individuals, homozygous for the ‘a’ allele, naïve for the ‘A’ allele. We then introduce 100 individuals that are homozygous for the beneficial allele ‘A’ in population 1. The allele spreads in the population and with a little lag also spreads into the other populations, increasing the mean fitness to 1.1 within 300 generations.
+```{r Model 2, fig.fullwidth=TRUE, fig.dim= c(10, 5), cache = T, fig.cap="Supplementary Figure 2. Fixation of a beneficial mutation on one single locus in a metapopulation. Each population has the same selection coefficient for the new mutation. Ten independent simulations shown."}
+load("../Data/Model2.RData")
+
+P1<-ggplot(sumsM2, aes(Generation, Fitness)) +
+    #geom_ribbon(aes(ymin = Fitness - sdFitness, ymax = Fitness + sdFitness, fill = no), alpha = 0.05) +
+    geom_line(aes(color = Population, group = interaction(no, Population)), alpha = 0.5) +
+    scale_y_continuous(breaks = pretty(x = seq(1, 1.1, by = 0.01))) +
+    ylab("Mean population fitness") +
+    theme(legend.position = c(0.8,0.3))
+
+P2<-ggplot(sumsM2, aes(Generation, HHr)) +
+    geom_line(aes(group=interaction(Population, Heterozygocity, no), color = Population, linetype = Heterozygocity), alpha = 0.5) +
+    ylab("Proportion of heterozygotes vs. homozygotes") +
+    scale_linetype_manual(values = c("dotted", "solid")) +
+    guides(color = FALSE) +
+    theme(legend.position = c(0.2,0.8), legend.title = element_blank())
+
+P2+P1
+ggsave("../Figures/S2.png", width = 10, height = 4, dpi = 300)
+```
+This model illustrates the basic assumption behind genetic intervention theory: the introduction of a beneficial mutation into a population of a metapopulation will create fitness benefit and spread rapidly in the system. However, it is completely unrealistic on two accounts: (i) in nature different populations have different environments, therefore the selection coefficient will vary spatially; and (ii) very few traits are coded by one single gene. Complex traits like thermal tolerance are rather coded by hundreds of loci, each with a tiny mutation effect. We will examine these factors below.  
+  
+  
+
+# Model 3 - single gene, multiple populations, environmental gradient
+Building on Model 2., this time each population has a different environmental condition, representing a stepping stone model along a latitudinal gradient, for example. The mutation that was beneficial in population 1 (e.g. low latitude population), will be less beneficial as we go towards higher latitudes; in the central population (population 3) it is neutral and beyond that it is increasingly detrimental. This is a scenario that mimics the latitudinal gradient of large ecosystems, for example coral reefs, and serves as a simplified demonstration of how ‘heat adapted’ genotypes are excluded by environmental filtering.  
+  
+Allele ‘A’ introduced in population 1 spreads quickly within the population, as in model 2. But contrary to model 2, the spread of the allele slows down in population 2, and even further in population 3 where the allele is neutral. In this population the allele spreads due to immigration from low latitude populations and genetic drift, but has no fitness effect. In population 4 we can observe a strong outbreeding depression due to immigration from lower latitude populations. Here, the ‘A’ allele is typically present in one copy per individual only (heterozygotes) because homozygotes are strongly maladapted and selected against. Interestingly, the magnitude of outbreeding depression is smaller in population 5 than in population 4, despite that the new allele is more detrimental there. This is because there is less intrusion of the allele via immigration from higher latitudes to this population (population 4 already acts as a filter in the stepping stone configuration).
+
+```{r Model 3, fig.fullwidth=TRUE, fig.dim= c(10, 10), cache = T,fig.cap = "Supplementary Figure 3. Spread of a new mutation on one single locus in a metapopulation where each subpopulation has a different environment, along a cline, representing a stepping stone model along a latitudinal gradient. The mutation that was beneficial in population 1 (low latitude population), will be less beneficial as we go towards higher latitudes; in the central population (population 3) it is neutral and beyond that it is increasingly detrimental. Observe the strong fitness cost of outbreeding depression in population 4."}
+load("../Data/Model3.RData")
+
+P1<-ggplot(sumsM3, aes(Generation, Fitness)) +
+    #geom_ribbon(aes(ymin = Fitness - sdFitness, ymax = Fitness + sdFitness, fill = no), alpha = 0.05) +
+    geom_line(aes(color = Population, group = interaction(no, Population)), alpha = 0.5) +
+    scale_y_continuous(breaks = pretty(x = seq(1, 1.1, by = 0.01))) +
+    theme(legend.position = 'top') +
+    ylab("Mean population fitness")
+
+P2<-ggplot(sumsM3, aes(Generation, HHr)) +
+    geom_line(aes(group=interaction(Population, Heterozygocity, no), color = Population, linetype = Heterozygocity), alpha = 0.5) +
+    ylab("Proportion of heterozygotes vs. homozygotes") +
+    scale_linetype_manual(values = c("dotted", "solid")) +
+    guides(color = FALSE) +
+    theme(legend.title = element_blank(), legend.position = 'bottom')
+P2/P1/plot_layout(guides = 'keep')
+ggsave("../Figures/S3.png", width = 8, height = 8, dpi = 300)
+```
+  
+    
+    
+# Model 4 - multiple genes, single population
+The fourth model is once again a single population model, but this time the trait is polygenic with additive quantitative trait loci (QTLs). We explored 2 types of interventions for four completely disconnected populations with different characteristics.  
+
+**The populations**
+Each starting population was maladapted: each individual had a phenotypic trait value of 0.8 in an environment where the phenotypic optimum was 1.0. The 0.8 phenotypic value was achieved in one of two different ways:  
+
+1.	In Population 1 and 2, each individual was homozygous to 40 QTLs with a mutation effect of 0.01 (40 x 2 x 0.01 = 0.8;);  
+2.	In Population 3 and 4, each individual was heterozygous to 80 QTLS (80 x 1 x 0.01 = 0.8).  
+The first two populations were therefore fixed for all loci and there was no room for further evolution (one single haplotype; evolutionary dead-end). Populations 3 and 4 had a wide. adaptive range (the maximum achievable phenotypic trait value in these populations was 80 x 2 x 0.01 = 1.6) due to high genetic variation on a large number of QTLs.
+
+**The interventions**
+Populations 1 and 3 were left to evolve without intervention, whereas populations 2 and 4 were given inoculum from a lab-grown pool of perfectly adapted individuals. These optimal phenotypes were created in one of the following ways:  
+*Intervention 1.*	Individuals had 20 new QTLs that were not present in the wild population before. This is what direct genetic modification or the translocation of individuals from a completely different genetic pool would result in. These new loci, were combined with the naturally existing genetic variation to make up the inoculum that was perfectly adapted to the recipient population’s environment (heterozygous to 80 natural loci and to 20 new loci = phenotypic value of 1.0);  
+*Intervention 2.*	Inoculum was created by re-shuffling only the naturally existing genetic variation on 80 loci, to create homozygotes for 20 loci and heterozygotes for 60 (hence with a phenotypic value of 1.0).  
+The effect of inoculum size was explored by running these interventions with 1, 10, 50 and 100% inoculum-to-recipient population ratio.  
+
+![Supplementary figure 4. Schematics of Model 4. ](../Data/S4.png){width=40%}
+
+
+### Results of Model 4
+Population 1 (evolutionary dead-end without intervention) remained maladapted throughout the simulation. Population 3 (good adaptive capacity, without intervention) very quickly evolved to adapt to the environmental optimum. In 10 generations the mean population phenotype climbed very close to the phenotypic optimum of 1.0. The mean fitness stagnated at around 0.9 for hundreds of generations, until the genetic variation was eroded and all individuals fixed to 50 loci and lost the rest.  
+Population 2 (evolutionary dead-end with intervention) benefited from the addition of new genetic variation (genetic rescue). The evolution of the mean phenotype over time was very similar between the two intervention methods (since both methods introduced new genetic variation that the population was naïve for), and was only a function of the ratio of inoculum to the recipient population. Here even a small amount of inoculum could make a big change; i.e. beneficial new variation spread quickly in the population (similar to the monogenic model, Model 1). Interestingly, mean fitness reached higher values in the first 50 generations if only small ratios of inoculum were added to the population compared to large inoculum sizes. This is because some of the introduced loci drift out immediately, and the resulting relatively lower genetic diversity creates less phenotypic variation (phenotypic variation is beneficial only in spatially or temporally heterogeneous environments). With a smaller inoculum, fewer new QTLs were added to the population, speeding up the evolutionary purging that led to achieving maximum fitness faster.  
+Population 4 (good adaptive capacity, with intervention) responded very similarly to the two intervention methods in terms of phenotypic change. Because it already had the adaptive capacity needed to match the phenotypic optimum (see Population 3), the addition of new alleles to the gene pool did not speed up adaptation in itself. Regardless of the actual genetic architecture of the inoculum, inoculation boosted the mean population phenotype in function of the inoculum size, and hence placed the population on an advanced trajectory towards matching the phenotypic optimum of the environment. However, the two intervention methods resulted in slightly different fitness benefits after the first 10 generations, with added genetic variation being slightly detrimental for mean population fitness for hundreds of generations compared to no-intervention or compared to reshuffling the standing genetic variation. Importantly, the fitness benefits of interventions were only significant in the first 10 generations, and only when inoculum size was large (i.e. > 50% of recipient population).
+
+
+```{r Model 4 A, fig.dim= c(10, 5), fig.fullwidth = T, cache = T, fig.cap="Supplementary Figure 5. Phenotype and fitness effect of two intervention types on genetically degraded (1 and 2) vs diverse (3 and 4) populations. Populations 1 and 3 were left to evolve without intervention (control), while 2 and 4 were inoculated with perfectly adapted individuals that either carried new adaptive variation, or only the locally existing genetic variants. Inoculation ratio to the recipient population is shown on facet rows."}
+
+load('../Data/Model4A.RData')
+sumsM4A <- lsM4A[[1]] %>%
+  mutate(Population = as.factor(Population),
+         INT = factor(INT, labels = c("adding new variation", 'reshuffling existing variation')),
+         I = factor(I, labels = c('1%', '10%', '50%', '100%')))
+
+P1<-ggplot(sumsM4A, aes(Generation, Phenotype)) +
+    geom_ribbon(aes(ymin = Phenotype - sdPhenotype, ymax = Phenotype + sdPhenotype, fill = Population), alpha = 0.05) +
+    geom_line(aes(color = Population, group = interaction(no, Population)), alpha = 0.5) +
+    scale_x_log10() +
+    theme_bw() +
+    facet_grid(I~INT) +
+    ylab("Mean population phenotype") +
+    theme(legend.position = 'bottom')
+
+P2<-ggplot(sumsM4A, aes(Generation, Fitness)) +
+    geom_line(aes(color = Population, group = interaction(no, Population)), alpha = 0.5) +
+    scale_x_log10() +
+    theme_bw() +
+    facet_grid(I~INT) +
+    ylab("Mean population fitness") +
+    theme(legend.position = 'none')
+
+P1+P2
+ggsave("../Figures/S5.png", width = 10, height = 5, dpi = 300)
+```
+
+An additional figure for each scenario about allele frequencies, if interested
+```{r Model 4 additional figures, eval=F}
+muts <- lsM4A[[2]] %>%
+  mutate(across(4:103, str_trim),
+         across(4:103, as.numeric)) %>%
+  pivot_longer(cols = 4:103, names_to = 'Mutation', values_to = 'MutCount') %>%
+  mutate(MutNum = parse_number(Mutation),
+         AF = MutCount/20000,
+         INT = factor(INT, labels = c("adding new variation", 'reshuffling existing variation')),
+         I = factor(I, labels = c('1%', '10%', '50%', '100%')))
+for (p in unique(muts$Population)) {
+  mutsp <- muts[muts$Population==p,]
+  ggplot(mutsp, aes(Generation, MutNum, fill = AF)) +
+    geom_raster() +
+    facet_grid(I~INT) +
+    scale_fill_gradientn(colours = rev(c('Red', "Orange", "Yellow", "Green", "Blue"))) +
+    ylab("QTL") +
+    theme_classic()
+  ggsave(filename = paste0("../Figures/Model4A", p, "_AF.png"), width = 20, height = 10, scale = 0.6, dpi = 300)
+}
+```
+  
+   
+   
+To test the effect of genetic diversity on the efficiency of interventions, we ran Model 4 with different QTL panels, ranging from 50 to 100 loci. Because the phenotypic optimum in this model is 1.0 and the mutation effect was fixed at a uniform 0.01 value, 50 QTLs were needed for successful adaptation, while 100 QTLs provided an adaptive scope up until the 2.0 phenotypic trait value. Our simulations showed that the impact of the intervention greatly depends on the genetic diversity of the recipient population. When genetic diversity was low, even a small amount of inoculum created a large (but temporary) fitness benefit. In contrast, when genetic diversity was high, the fitness benefit was lower and faded away faster.
+
+```{r Model 4 creating more plots, fig.dim= c(10, 5), fig.fullwidth = T, cache = T, fig.cap="Supplementary Figure 6. Net fitness effect of two intervention types on populations with varying genetic diversity. The number of loci (#QTL, represented with colors) is directly proportional to genetic diversity since individuals strive to achieve a 1.0 phenotype with a uniform mutation effect of 0.01. When genetic diversity is low (50 QTLs, in red), even a small amount of inoculum creates a large (but temporary) fitness benefit, whereas a much larger inoculation ratio is needed to achieve the same effect in a genetically diverse population (80 QTLs, in purple). Inoculation ratio indicated in facet rows."}
+load('../Data/Model4B.RData')
+FB <- sumsM4B %>%
+  select(Generation, Population, Fitness, INT, I, U, no) %>%
+  pivot_wider(names_from = Population, values_from = Fitness, names_prefix = 'P') %>%
+  mutate(FB = P3-P4,
+         I = factor(I, labels = c('1%', '10%', '50%', '100%')))
+
+ggplot(FB, aes(Generation, FB, color = U, group = interaction(no, U))) +
+  geom_line(alpha = 0.4) +
+  scale_x_log10() +
+  theme_bw() +
+  facet_grid(I~INT) +
+  labs(color = "#QTL") +
+  ylab("Mean fitness effect")
+ggsave("../Figures/S6.png", width = 12, height = 9, scale = 0.5)
+```
+In summary, this model demonstrates that genetic rescue of an evolutionarily compromised, low diversity population is very different from intervening in a population with substantial genetic variation and hence adaptive capacity. A small amount of inoculum has a large effect on the evolutionary trajectory of genetically eroded populations, but large inoculum sizes are needed to reach any effect on genetically diverse populations; and the fitness benefits quickly fade away with time. 
+
+

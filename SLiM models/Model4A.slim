@@ -1,0 +1,198 @@
+// This is a model to test the effect of genetic diversity on the slope of pop 3 in Model 4
+// Worked from Model 4, just by killing all pops but #3 and 4 to speed things up
+
+initialize() {
+	
+	//setwd("/Users/jc205026/SLIM/PA101");
+	defineConstant("folder", "Model4v3b");
+	//defineConstant("no", 1);
+	setSeed(no);
+	
+	//POPULATION SPECS
+	defineConstant("K", 10000); //population size
+	//defineConstant("I", 1000); // inocculum size
+	defineConstant("N", 4);     // number of subpopulations
+	
+	//ENVIRONMENTAL SPECS
+	defineConstant("opt", 1); //environmental optimum 
+	
+	//GENOME
+	defineConstant("WoFF",0.1); // Width of fitness function. In this case, roughly ~ environmental tolerance envelope
+	defineConstant("Q", 120);				// number of QTLs
+	//defineConstant("U", 100); // number of QTLs present in the population
+	//defineConstant("INT", 1); // intervention type: 1 = adding new genetic variation, 2 = reshuffling existing genetic variation
+	
+	initializeMutationRate(0);
+	initializeMutationType("m1", 0.5, "f", 0.01);		// thermal QTL with fixed mutation effect (for demo)
+	initializeGenomicElementType("g1", m1, 1.0);
+	initializeGenomicElement(g1,0,asInteger(Q-1));
+	initializeRecombinationRate(0.5);
+	m1.convertToSubstitution =F;
+	m1.mutationStackPolicy = "l";
+	
+	//OUTPUTS
+	defineConstant("id", asString('I_' + I + '_INT' + INT + '_U' + U + '_' + no));
+	defineConstant("outSumFile",	"./"+folder+"/sum_"+ id + ".csv");
+	
+	///outHeader = "Generation" + "," + "Population" + ", "  + "Optimum" + ", "  + "Popsize" + ", " + "Phenotype" + "," + "sdPhenotype" + "," + "Mismatch" + ", " + "Fitness" + ", " + "sdFitness" + ", "+ "INT" + ", " +  "I" + ", " + "no" + ", " + "U" + ", " + "id";
+	//writeFile(outSumFile, outHeader, append=F);
+	
+	defineConstant("outMutsFile",	"./"+folder+"/muts_"+ id + ".csv");
+	//mutsHeader = "Generation" + "," + "Population" + ", "  + "Popsize" + ", " + paste((rep("M", Q) + 1:Q), sep = ", ") + ", " + "INT" + ", " +  "I" + ", " + "no" + ", " + "U" + ", " + "id";
+	//writeFile(outMutsFile, mutsHeader, append=F);
+	
+	defineConstant("outIndsFile",	"./"+folder+"/inds_"+ id + "_" + no + ".csv");
+	//indsHeader = "Generation" + ", "  + "Population" + ", " + "Mismatch" + ", " + "Phenotype" + ", "  + "Phenofitness" + ", " + "id";
+	//writeFile(outIndsFile, indsHeader, append=F);
+}
+
+fitness(m1) {return 1.0;}   // make QTLs intrinsically neutral
+
+1 early () {
+	for (n in 1:N)
+		sim.addSubpop(n, K);
+	subpop = sim.subpopulations;
+	p1.setSubpopulationSize(0);
+	p2.setSubpopulationSize(0);
+	
+	// create all mutations in a genome in a dummy subpopulation
+	sim.addSubpop("p5", 1);
+	g = p5.genomes[0];
+	mutsAll = g.addNewDrawnMutation(m1, 0:(Q-1));
+	// remove the dummy subpopulation
+	p5.setSubpopulationSize(0);
+	
+	// two pops are unfixed with a phenotype of 0.8
+	if (U < 80) {
+		He = (2*U-80);
+		Ho = U-He;
+	} else {
+		He = 80;
+		Ho = 0;
+	}
+	
+	if (He > 0)
+		muts1 = mutsAll[0:(He-1)];
+	if (Ho > 0)
+		muts2 = mutsAll[He:(He+Ho-1)];
+	for (s in 2:3) {
+		for (i in subpop[s].individuals) {
+			if (He > 0)
+				i.genome1.addMutations(muts1);
+			if (Ho > 0)
+				i.genomes.addMutations(muts2);
+		
+		}
+	}
+}
+
+2 early () {
+	subpop = sim.subpopulations;
+	
+	// intervention 1: heterozygous to He loci, homozygous to Ho loci, plus 20 new, aka GMO or translocation
+	mutsAllExisting = unique(sim.subpopulations.genomes.mutations);
+	if (INT == 1) {
+		mutsIE = mutsAllExisting[0:(U-1)];
+		if (U < 80) {
+			He = (2*U-80);
+			Ho = U-He;
+		} else {
+			He = 80;
+			Ho = 0;
+		}
+		mutsI1 = mutsAllExisting[0:(He-1)];
+		if (Ho > 0)
+			mutsI2 = mutsAllExisting[He:(He+Ho-1)];
+		target = sample(p3.individuals, I);
+		target.genomes.removeMutations();
+		target.genome1.addMutations(mutsI1);
+		if (Ho > 0)
+			target.genomes.addMutations(mutsI2);
+		target.genome1.addNewDrawnMutation(m1, U:(U+19)); //20 new loci
+	
+	}
+	// intervention 2: homozygous to 20 lociand heterozygous to 60 loci, aka reshuffling the natural genetic variation through selective breeding
+	if (INT == 2) {
+		He = (2*U-100);
+		Ho = U-He;
+		if (He > 0)
+			mutsI1 = mutsAllExisting[0:(He-1)];
+		if (He < U)
+			mutsI2 = mutsAllExisting[He:(He+Ho-1)];
+		target = sample(p3.individuals, I);
+		target.genomes.removeMutations();
+		if (He > 0)
+			target.genome1.addMutations(mutsI1);
+		if (He < U)
+			target.genomes.addMutations(mutsI2);
+	}
+}
+
+late () {
+	// QTL-based fitness
+	subpop = sim.subpopulations;
+	for (s in subpop) {
+		inds = s.individuals;
+		phenotype = inds.sumOfMutationsOfType(m1);
+		optimum = opt;
+		mismatch = abs(optimum - phenotype);
+		phenoFitness = dnorm(mismatch, 0, WoFF) / dnorm(rep(0.0, length(mismatch)), 0, WoFF);
+		
+		inds.fitnessScaling = phenoFitness;
+		s.setValue("opti", optimum);
+		s.setValue("mPht", mean(phenotype));
+		s.setValue("sdPht", sd(phenotype));
+		s.setValue("mMis", mean(mismatch));
+		s.setValue("mPhf", mean(phenoFitness));
+		s.setValue("sdPhf", sd(phenoFitness));
+		
+		
+		for (i in inds) {
+			i.setValue("pht", phenotype[i.index]);
+			i.setValue("mis", mismatch[i.index]);
+			i.setValue("phf", phenoFitness[i.index]);
+		}
+		
+		//calculate nucleotide frequencies per population
+		//muts = s.genomes.mutations.position;
+		//mutsLine = object();
+		//for (n in 0:(Q-1)) { //for every QTL position count the number of cases where there is a mutation
+		//	nf = length(muts[muts == n]);
+		//	mutsLine = n == 0? nf else c(mutsLine, nf);
+		//}
+		//s.setValue("muts", paste0(asString(mutsLine + ",")));
+	}
+	
+	//OUTPUTS
+	inds = subpop.individuals;
+	//outSumLine = sim.generation + ", " + subpop.id + ", " + subpop.getValue("opti") + ", " + subpop.individualCount + ", " + subpop.getValue("mPht") + ", " + subpop.getValue("sdPht") + ", " + subpop.getValue("mMis") + ", " + subpop.getValue("mPhf") + ", " + subpop.getValue("sdPhf") +  ", " + INT + ", " + I + ", " + no + ", " + U + ", " + id;
+	//writeFile(outSumFile, outSumLine, append=T);
+	
+	//outMutsLine = sim.generation + ", " + subpop.id + ", " + subpop.individualCount + ", " + subpop.getValue("muts") + INT + ", " + I + ", " + no + ", " + U + ", " + id;
+	//writeFile(outMutsFile, outMutsLine, append=T);
+	
+	if (any(sim.generation == c(3, 4, 5))) {//2, 10, 20, 50, 100, 200, 300, 1000
+		//	outIndsLine = sim.generation + ", "  + inds.subpopulation.id + ", " + inds.getValue("mis") + ", " + inds.getValue("pht") + ", " + inds.getValue("phf") + ", " + id;
+		//writeFile(outIndsFile, outIndsLine, append=T);
+		subpop.individuals.genomes.outputVCF(paste0(c("./", folder, "/", id, "_G", sim.generation, ".vcf")));
+	
+	}
+}
+
+1000 late() {
+	sim.simulationFinished();
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,1965 @@
+---
+title: "Model 5 - analyses"
+author: "Greg Torda"
+date: "19/11/2020"
+output:
+  html_document:
+    code_folding: show
+    collapse: no
+    df_print: paged
+    fig_caption: yes
+    fig_height: 4
+    fig_width: 4
+    highlight: textmate
+    theme: spacelab
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    df_print: default
+    fig_caption: yes
+    fig_height: 4
+    fig_width: 4
+    highlight: tango
+    latex_engine: xelatex
+    number_sections: yes
+    toc_depth: 2
+  word_document:
+    fig_caption: yes
+    fig_height: 4
+    fig_width: 4
+    highlight: tango
+    toc: yes
+    toc_depth: 2
+output_dir: "docs"
+documentclass: article
+fontsize: 12pt
+mainfont: Arial
+mathfont: LiberationMono
+monofont: DejaVu Sans Mono
+classoption: a4paper
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message=FALSE, warning=FALSE)
+```
+
+# Preparations
+
+Load the necessary libraries and set the default ggplot theme
+```{r libraries, results='markdown', eval=TRUE}
+library(tidyverse)
+library(patchwork)
+library(scales)
+library(reshape2)
+library(vcfR)
+library(adegenet)
+library(dartR)  
+library(knitr)
+theme_set(theme_bw())
+```
+  
+  
+# Background
+In the spirit of reproducible research, this markdown guides you through the steps to analyse the data and create the figures for Torda and Quigley 2020 Drivers of adaptive capacity in wild populations: implications for genetic intervention effects.  
+Please read the manuscript to understand what we are doing here. Briefly, we created Fisher-Wright evolutionary models in SLiM 3 (Haller and Messer 2019) for five populations arranged in a stepping stone metapopulation scheme. Each population had a different environment, with phenotypic optima ranging from 1.1 (population 1) to 0.9 (population 5). You will notice that these values are centred around 1.0, which is simply to make the evolutionary models fast and simple - but these values can easily be re-scaled to, for example, a metapopulation with an environmental range of 2 units. You can think about the environmental values could be any selected trait. In our example, we consider these to be temperature, and the models simulate adaptation to temperature change in a metapopulation that spans a large environmental gradient After 100 generations of burnin, we faded in an ENSO-like environmental oscillation over the period of 100 generations, until the oscillation had an amplitude of 0.1 units with a period of 5 generations. At 200 generations we started ramping up the 'temperature', 0.01 units per generation, evenly in the metapopulation.  
+
+In the first part of the manuscript we explore how the simulated populations adapt to this environmental change at different population genomic parameter values. The goal of this exercise was to understand which parameters are most influential for the outcome of adaptation, and hence to guide future research focus on better describing these parameters in wild populations.  
+
+The second part of the manuscript assesses the fitness effects of genetic interventions. We simulated three intervention scenarios, and manipulated model parameters that are pertinent to the wild population (population genomic parameters, as above) as well as to the intervention (e.g. the timing of intervention,  the number of manipulated individuals introduced in the wild, etc). The three scenarios are  
+1. crossing the warmest and coolest populations artificially, select offspring for the environment of the target population, and introduce them in the wild;  
+2. artificially re-shuffle the standing genetic variation in the metapopulation to create individuals whose phenotype perfectly matches the environment in the target population at the time of intervention;  
+3. similar to scenario 2. but this time new adaptive loci are also introduced to the wild via the inoculum.  
+
+
+# Calculating heterozigosity
+The first thing we need to do is calculate genetic diversity (heterozygosity) relative to the number of loci that code the trait under selection. Most population genomic parameters can be directly manipulated in the model, but genetic diversity cannot. To achieve different levels of genetic diversity at certain generations, we chose to manipulate the number of loci, while keeping mutation effects constant. At low number of loci, the metapopulation fixes for the derived allele for most loci, to achieve the optimum phenotype in each environment, end genetic diversity will be low. In contrast, when there is a large 'surplus' of loci, the same phenotype can be achieved in many different locus combinations, and genetic diversity will be high.  
+Let's have a look at this. We will use vcf files exported from SLiM 50 generations after the warming.
+```{r heterozygosity, cache = T, fig.align='center'}
+load('../Data/vcfFiles.RData')
+
+vcfls <- list()
+for(f in names(Files)) {
+  gl <- vcfR2genlight(Files[[f]])
+  # We can select random individuals and a proportion of the loci randomly, e.g. like this:
+  # gl[sample(1:50000, size = 32, replace = F), sample(1:nLoc(gl), size = nLoc(gl)/2, replace = F)]
+  # Or we can use the whole dataset. Here we will use the whole dataset, but keep the code easily adjustable:
+  gl.ss <- gl 
+  pop(gl.ss) <- rep(1, nInd(gl.ss))
+  gl.ss@ploidy <- as.integer(rep(2, nInd(gl.ss)))
+  gl.ss@other$loc.metrics.flags$monomorphs <- FALSE
+
+  report <- gl.report.heterozygosity(gl.ss, method = 'pop', verbose = 0) %>%
+    mutate(File = f)
+
+  vcfls[[f]] <- report
+}
+
+He <- do.call('rbind', vcfls) %>%
+  separate(col = File, into = c('burnin', 'U', 'me', 'G'), sep = '_') %>%
+  dplyr::select(U, me, He) %>%
+  mutate(U = parse_number(U),
+         me = parse_number(me),
+         HeR = round(He, digits = 2))
+
+ggplot(He, aes(U, HeR)) +
+  geom_point() +
+  geom_line(linetype = 'dashed') +
+  labs(color = 'Generations\nafter warming') +
+  xlab("Number of QTLs") +
+  ylab("Heterozygosity")
+
+# save(He, file = '../Data/He.RData')
+```
+  
+  
+# Loading simulation results
+The next step is to load the output of the simulations. We have pre-compiled the output into a list. The population-level metrics of interest are in element 1, the mutations at certain generations in element 2, and the model parameters in element 3. There is an extra dataset in element 4, which is similar to element 1, but for Population 3 as a target for intervention, instead of population 4. Once we loaded these, we can join the previously calculated heterozygosity values to the data; and we can identify the simulations with and without intervention. Let's see:
+
+```{r loading data, cache = T}
+load('../Data/He.RData')
+
+load('../Data/Model5.RData')
+
+params <- Model5[[3]]
+sums <- Model5[[1]]  %>%
+  left_join(params)  %>%
+  left_join(He)
+
+# Identify control runs
+sums$AGV[sums$IM==1] <- -1
+controlIM1 <- sums %>%
+  filter(IM == 0,
+         AGV == 0) %>%
+  mutate(AGV = -1)
+
+# ControlIM1 will be our object to explore the natural rates and scope of adaptation. 
+# Now we have to merge it back to the original data so that we will be able to calculate the difference between intervention and control for the second part of the manuscript.
+sumsNew <- rbind(sums, controlIM1)
+#This will be our main object for the intervention analyses.
+
+# There is an extra sums dataset in Model5 that we will use at the end. Let's make it an object here though.
+sumsP3 <- Model5[[4]] %>%
+  left_join(params)  %>%
+  left_join(He)
+# Identify control runs, as before
+sumsP3$AGV[sumsP3$IM==1] <- -1
+controlIM1 <- sumsP3 %>%
+  filter(IM == 0,
+         AGV == 0) %>%
+  mutate(AGV = -1)
+
+sumsNewP3 <- rbind(sumsP3, controlIM1)
+```
+  
+  
+Now let's have a look at the columns (not evaluated for html).
+```{r columns, eval=F}
+colnames(sums) %>% kable()
+```
+
+Most of them are the model parameters to help identify the simulation and subset the data for analysis and plotting (marked with *italics*), others are the actual model outputs.  
+  
+Generation: Generation of the simulation  
+Population: Population ID (there are 5 populations, plus a 6th one for lab-based breeding in some scenarios)  
+*Optimum: Environmental optimum of the population*  
+Climate: Deviation from the environmental optimum due to warming and/or ENSO-like oscillations  
+Popsize: Population size  
+Phenotype: Mean phenotype of the population in the given generation  
+sdPhenotype: Standard deviation of the phenotype of the population in the given generation  
+Mismatch: Mean genotype - environment mismatch in the population in the given generation  
+Fitness: Mean fitness of the population in the given generation  
+sdFitness: Standard deviation of the fitness of the population in the given generation  
+*id: unique ID for the simulation*  
+*K: population size*  
+*burnin: burnin of the simulation without environmental change*  
+*EN: ENSO-like oscillations: 0 = yes, 10000 = no*  
+*aIoC: time of intervention following warming (# of generations)*  
+*IM: intervention method: 0 = no intervention (control), 1 = intervention scenario 1; 2 =  intervention scenarios 2 and 3*  
+*I: ration of inoculum to K*  
+*S: size of broodstock in lab-based rearing * 
+*U: number of QTLs*  
+*AGV: number of novel loci added to the metapopulation*  
+*MS: migration rate southwards (northwards it is half of MS)*  
+*me: mutation effect size*  
+*mr: mutation rate*  
+*WoFF: width (sd) of the fitness function (~environmental tolerance)*  
+*no: iteration number (also random seed number)*  
+He: heterozigosity  
+HeR: heterozigosity rounded to two decimal places  
+
+# Analyses to create figures
+Now that we are familiar with the data, we can slice it in a lot of different ways to decipher which model parameters were most influential for the pace and scope of natural adaptation, and for the fitness effect of genetic interventions. The simulations were run varying one parameter at a time, while keeping all others fixed at a specific value. We will need to subset the whole dataset in a different way for every parameter, to get only the relevant parameter value combinations.  
+
+## Pace and scope of adaptation in wild populations
+
+We will use the 'control' simulations for these analyses/graphs. We will look at the period from the beginning of warming to 100 generations after warming. Genetic interventions (second part of the manuscript) are timed to 50 generations after warming, so the most relevant metrics will be around this timepoint.
+  
+  
+### Effect of connectivity
+```{r Pace and scope - Effect of connectivity, fig.dim=c(10, 5), cache = T}
+# Subsetting the control dataset for relevant parameter value combinations and generations
+control.ss <- controlIM1 %>%
+  filter(K == 10000, I == 0.5, S == 100, U == 100, me == 0.01, mr == 0, aIoC == 50, Population != 6, WoFF == 0.1) %>%
+  mutate(Generation = as.numeric(Generation),
+         Population = as.factor(Population),
+         MS = as.factor(paste0(MS*100, "%")),
+         IM = as.factor(IM),
+         EN = factor(EN, labels = c("with El Nino", "without El Nino")),
+         GenNorm = Generation-(burnin+100)) %>%
+  mutate_if(is.character, as.factor) %>%
+  filter(GenNorm %in% c(0:100)) %>%
+  droplevels()
+
+ggplot(control.ss, aes(GenNorm, Phenotype)) +
+  geom_line(aes(color = Population, group = interaction(no, Population)), alpha = 0.3) +
+  theme_bw() +
+  xlab("Generations since warming") +
+  ylab("Mean population phenotype") +
+  facet_grid(EN~MS) +
+  geom_vline(xintercept = 50, linetype = 'dotted', alpha = 0.4) +
+  theme(legend.position = 'bottom')
+
+# Fitness change in 20 years after warming
+t2 <- control.ss %>%
+    filter(GenNorm %in% c(0, 20), EN == 'without El Nino') %>%
+    mutate(GenNorm = factor(GenNorm, labels = c('t1', 't2'))) %>%
+    select(MS, GenNorm, Population, Phenotype, Fitness, no) %>%
+    pivot_wider(names_from = GenNorm, values_from = c(Phenotype, Fitness)) %>%
+    mutate(dPht = Phenotype_t2-Phenotype_t1, dFit = Fitness_t2 - Fitness_t1)
+
+(FDCON <- ggplot(t2, aes(MS, dFit, color = Population, group = interaction(Population,no))) +
+  geom_line(alpha = 0.5) +
+  xlab('Warm to cold migration rate') +
+  ylab("Fitness change in 20 years of warming") +
+  guides(color = guide_legend(override.aes = list(alpha = 0.8))) +
+  ggtitle("The effect of connectivity on adaptation rate"))
+
+# Relative importance for pace of adaptation
+# We will use this object later to make a compound figure
+t3.con <- t2 %>%
+  group_by(Population, no) %>%
+  summarize(RangePht = max(dPht) - min(dPht), 
+            SDPht = sd(dPht),
+            RangeFit = max(dFit) - min(dFit), 
+            SDFit = sd(dFit)) %>%
+  mutate(Parameter = 'Connectivity')
+
+ggplot(t3.con,aes(y = RangeFit, x = Population, color = Population)) + 
+  geom_boxplot() +
+  ylab("Relative importance") +
+  theme(legend.position = 'none')
+
+# Phenotype and fitness at generation 20, 50 and 100 after warming
+# We will use this object later to make a mopound figure
+t4.con <- control.ss %>% 
+  filter(GenNorm %in% c(20, 50, 100), EN == 'without El Nino') %>%
+  select(MS, GenNorm, Population, Phenotype, Fitness, no) %>%
+  group_by(GenNorm, Population, no) %>%
+  summarize(RangePht = max(Phenotype) - min(Phenotype),
+            sdPht = sd(Phenotype),
+            RangeFit = max(Fitness) - min(Fitness),
+            sdFit = sd(Fitness)) %>%
+  ungroup() %>%
+  mutate(Parameter = 'Connectivity',
+         GenNorm2 = (factor(GenNorm, labels = c('20 generations post warming', '50 generations post warming', '100 generations post warming'))))
+
+
+ggplot(t4.con, aes(x = Population, y = sdFit, color = Population, )) +
+  geom_boxplot() + 
+  facet_wrap(~GenNorm2) +
+  ylab('Standard deviation of fitness values') +
+  theme(legend.position = 'none')
+```
+
+
+### Effect of environmental tolerance
+```{r Pace and scope - Effect of environmental tolerance, fig.dim=c(10, 5), cache = T}
+# Subsetting the control dataset for relevant parameter value combinations and generations
+control.ss <- controlIM1 %>%
+  filter(K == 10000, I == 0.5, S == 100, U == 100, me == 0.01, mr == 0, aIoC == 50, Population != 6, MS == 0.01) %>%
+  mutate(Generation = as.numeric(Generation),
+         Population = as.factor(Population),
+         MS = as.numeric(MS),
+         IM = as.factor(IM),
+         EN = factor(EN, labels = c("with El Nino", "without El Nino")),
+         GenNorm = Generation-(burnin+100)) %>%
+  mutate_if(is.character, as.factor) %>%
+  filter(GenNorm %in% c(0:100)) %>%
+  droplevels()
+
+ggplot(control.ss, aes(GenNorm, Phenotype)) +
+  geom_line(aes(color = Population, group = interaction(no, Population)), alpha = 0.3) +
+  theme_bw() +
+  xlab("Generations since warming") +
+  ylab("Mean population phenotype") +
+  facet_grid(EN~WoFF) +
+  geom_vline(xintercept = 50, linetype = 'dotted', alpha = 0.4) +
+  theme(legend.position = 'bottom')
+
+#The effect on mean population fitness by generation 20, 50 and 100 after warming
+t1 <- control.ss %>%
+    filter(GenNorm %in% c(20, 50, 100), EN == 'without El Nino') %>%
+    mutate(GenNorm2 = (factor(GenNorm, labels = c('20 generations post warming', '50 generations post warming', '100 generations post warming')))) %>%
+    group_by(GenNorm2, WoFF, Population, no) %>%
+    summarize(mPht = ((Phenotype)), mFit = ((Fitness)))
+
+(ASwoff <- ggplot(t1, aes(WoFF, mFit, color = Population, group = interaction(Population,no))) +
+  geom_line(alpha = 0.3) +
+  facet_wrap(~GenNorm2) +
+  xlab('Environmental tolerance') +
+  ylab("Mean population fitness") +
+    scale_x_continuous(breaks = unique(t1$WoFF)) +
+    guides(color = guide_legend(override.aes = list(alpha = 0.8))) +
+  ggtitle("The effect of environmental tolerance on mean population fitness"))
+
+# Fitness change in 20 years after warming
+t2 <- control.ss %>%
+    filter(GenNorm %in% c(0, 20), EN == 'without El Nino') %>%
+    mutate(GenNorm = factor(GenNorm, labels = c('t1', 't2'))) %>%
+    select(WoFF, GenNorm, Population, Phenotype, Fitness, no) %>%
+    pivot_wider(names_from = GenNorm, values_from = c(Phenotype, Fitness)) %>%
+    mutate(dPht = Phenotype_t2-Phenotype_t1, dFit = Fitness_t2 - Fitness_t1)
+
+(FDWOFF <- ggplot(t2, aes(WoFF, dFit, color = Population, group = interaction(Population,no))) +
+    geom_line(alpha = 0.5) +
+    xlab('Environmental tolerance') +
+    ylab("Fitness change in 20 years of warming") +
+    scale_x_continuous(breaks = unique(t1$WoFF)) +
+    guides(color = guide_legend(override.aes = list(alpha = 0.8))) +
+    ggtitle("The effect of env. tolerance on adaptation rate"))
+
+# Relative importance for pace of adaptation
+t3.woff <- t2 %>%
+  group_by(Population, no) %>%
+  summarize(RangePht = max(dPht) - min(dPht), 
+            SDPht = sd(dPht),
+            RangeFit = max(dFit) - min(dFit), 
+            SDFit = sd(dFit)) %>%
+  mutate(Parameter = 'Environmental tolerance')
+
+ggplot(t3.woff,aes(y = RangeFit, x = Population, color = Population)) + 
+  geom_boxplot() +
+  ylab("Relative importance") +
+  theme(legend.position = 'none')
+
+# Phenotype and fitness at generation 20, 50, 100
+t4.woff <- control.ss %>% 
+  filter(GenNorm %in% c(20, 50, 100), EN == 'without El Nino') %>%
+  select(WoFF, GenNorm, Population, Phenotype, Fitness, no) %>%
+  group_by(GenNorm, Population, no) %>%
+  summarize(RangePht = max(Phenotype) - min(Phenotype),
+            sdPht = sd(Phenotype),
+            RangeFit = max(Fitness) - min(Fitness),
+            sdFit = sd(Fitness)) %>%
+  ungroup() %>%
+  mutate(Parameter = 'Environmental tolerance',
+         GenNorm2 = (factor(GenNorm, labels = c('20 generations post warming', '50 generations post warming', '100 generations post warming'))))
+
+ggplot(t4.woff, aes(x = Population, y = sdFit, color = Population, )) +
+  geom_boxplot() + 
+  facet_wrap(~GenNorm2) +
+  ylab('Standard deviation of fitness values') +
+  theme(legend.position = 'none')
+```
+
+
+### Effect of genetic diversity
+```{r Pace and scope - Effect of genetic diversity, fig.dim=c(10, 5), cache = T}
+control.ss <- controlIM1 %>%
+  filter(K == 10000, I == 0.5, S == 100, !U %in% c(50, 150, 200), MS == 0.01, me == 0.01, mr == 0, aIoC == 50, Population != 6, WoFF == 0.1) %>%
+  mutate(Generation = as.numeric(Generation),
+         Population = as.factor(Population),
+         MS = as.numeric(MS),
+         IM = as.factor(IM),
+         EN = factor(EN, labels = c("with El Nino", "without El Nino")),
+         GenNorm = Generation-(burnin+100),
+         ) %>%
+  mutate_if(is.character, as.factor) %>%
+  filter(GenNorm %in% c(0:100)) %>%
+  droplevels()
+
+ggplot(control.ss, aes(GenNorm, Phenotype)) +
+  geom_line(aes(color = Population, group = interaction(no, Population)), alpha = 0.3) +
+  theme_bw() +
+  xlab("Generations since warming") +
+  ylab("Mean population phenotype") +
+  facet_grid(EN~HeR) +
+  geom_vline(xintercept = 0, linetype = 'dotted', alpha = 0.4) +
+  theme(legend.position = 'bottom')
+
+#The effect on mean population fitness by generation 20, 50 and 100 after warming
+t1 <- control.ss %>%
+    filter(GenNorm %in% c(20, 50, 100), EN == 'without El Nino') %>%
+    mutate(GenNorm2 = (factor(GenNorm, labels = c('20 generations post warming', '50 generations post warming', '100 generations post warming')))) %>%
+    group_by(GenNorm2, HeR, Population, no) %>%
+    summarize(mPht = ((Phenotype)), mFit = ((Fitness)))
+
+(ASdiv <- ggplot(t1, aes(HeR, mFit, color = Population, group = interaction(Population,no))) +
+  geom_line(alpha = 0.3) +
+  facet_wrap(~GenNorm2) +
+  xlab('Genetic diversity') +
+  ylab("Mean population fitness") +
+    scale_x_continuous(breaks = unique(t1$HeR)) +
+    guides(color = guide_legend(override.aes = list(alpha = 0.8))) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  ggtitle("The effect of genetic diversity on mean population fitness"))
+
+# Fitness change in 20 years after warming
+t2 <- control.ss %>%
+    filter(GenNorm %in% c(0, 20), EN == 'without El Nino') %>%
+    mutate(GenNorm = factor(GenNorm, labels = c('t1', 't2'))) %>%
+    select(HeR, GenNorm, Population, Phenotype, Fitness, no) %>%
+    pivot_wider(names_from = GenNorm, values_from = c(Phenotype, Fitness)) %>%
+    mutate(dPht = Phenotype_t2-Phenotype_t1, dFit = Fitness_t2 - Fitness_t1)
+
+(FDDIV <- ggplot(t2, aes(HeR, dFit, color = Population, group = interaction(Population,no))) +
+  geom_line(alpha = 0.5) +
+  xlab('Genetic diversity') +
+  ylab("Fitness change in 20 years of warming") +
+    scale_x_continuous(breaks = unique(t1$HeR)[-0.48]) +
+    guides(color = guide_legend(override.aes = list(alpha = 0.8))) +
+  ggtitle("The effect of genetic diversity on adaptation rate"))
+
+# Relative importance for pace of adaptation
+t3.div <- t2 %>%
+  group_by(Population, no) %>%
+  summarize(RangePht = max(dPht) - min(dPht), 
+            SDPht = sd(dPht),
+            RangeFit = max(dFit) - min(dFit), 
+            SDFit = sd(dFit)) %>%
+  mutate(Parameter = 'Genetic diversity')
+
+ggplot(t3.div,aes(y = RangeFit, x = Population, color = Population)) + 
+  geom_boxplot() +
+  ylab("Relative importance") +
+  theme(legend.position = 'none')
+
+# Phenotype and fitness at generation 20, 50, 100
+t4.div <- control.ss %>% 
+  filter(GenNorm %in% c(20, 50, 100), EN == 'without El Nino') %>%
+  select(U, GenNorm, Population, Phenotype, Fitness, no) %>%
+  group_by(GenNorm, Population, no) %>%
+  summarize(RangePht = max(Phenotype) - min(Phenotype),
+            sdPht = sd(Phenotype),
+            RangeFit = max(Fitness) - min(Fitness),
+            sdFit = sd(Fitness)) %>%
+  ungroup() %>%
+  mutate(Parameter = 'Genetic diversity',
+         GenNorm2 = (factor(GenNorm, labels = c('20 generations post warming', '50 generations post warming', '100 generations post warming'))))
+
+ggplot(t4.div, aes(x = Population, y = sdFit, color = Population, )) +
+  geom_boxplot() + 
+  facet_wrap(~GenNorm2) +
+  ylab('Standard deviation of fitness values') +
+  theme(legend.position = 'none')
+
+# Some specific values mentioned in the manuscript
+t2 %>% group_by(HeR, Population) %>%
+  summarize('Mean fitness' = mean(dFit), 'SD Fitness' = sd(dFit)) %>%
+  rename(Heterozygocity = HeR) %>%
+  kable(align = 'c')
+```
+
+
+### Effect of population size
+```{r Pace and scope - Effect of population size, fig.dim=c(10, 5), cache = T}
+control.ss <- controlIM1 %>%
+  filter(I == 0.5, U == 100, S == 100, MS == 0.01, me == 0.01, mr == 0, aIoC == 50, Population != 6, WoFF == 0.1) %>%
+  mutate(Generation = as.numeric(Generation),
+         Population = as.factor(Population),
+         MS = as.numeric(MS),
+         IM = as.factor(IM),
+         EN = factor(EN, labels = c("with El Nino", "without El Nino")),
+         GenNorm = Generation-(burnin+100)) %>%
+  mutate_if(is.character, as.factor) %>%
+  filter(GenNorm %in% c(0:100)) %>%
+  droplevels()
+
+ggplot(control.ss, aes(GenNorm, Phenotype)) +
+  geom_line(aes(color = Population, group = interaction(no, Population)), alpha = 0.3) +
+  theme_bw() +
+  xlab("Generations since warming") +
+  ylab("Mean population phenotype") +
+  facet_grid(EN~K) +
+  geom_vline(xintercept = 0, linetype = 'dotted', alpha = 0.4) +
+  theme(legend.position = 'bottom')
+
+# Fitness change in 20 years after warming
+t2 <- control.ss %>%
+    filter(GenNorm %in% c(0, 20), EN == 'without El Nino') %>%
+    mutate(GenNorm = factor(GenNorm, labels = c('t1', 't2'))) %>%
+    select(K, GenNorm, Population, Phenotype, Fitness, no) %>%
+    pivot_wider(names_from = GenNorm, values_from = c(Phenotype, Fitness)) %>%
+    mutate(dPht = Phenotype_t2-Phenotype_t1, dFit = Fitness_t2 - Fitness_t1)
+
+ggplot(t2, aes(K, dFit, color = Population, group = interaction(Population,no))) +
+  geom_line(alpha = 0.5) +
+  xlab('Population size') +
+  ylab("Fitness change in 20 years of warming") +
+  guides(color = guide_legend(override.aes = list(alpha = 0.8))) +
+  ggtitle("The effect of population size on adaptation rate")
+
+#Relative importance
+t3.pop <- t2 %>%
+  group_by(Population, no) %>%
+  summarize(RangePht = max(dPht) - min(dPht), 
+            SDPht = sd(dPht),
+            RangeFit = max(dFit) - min(dFit), 
+            SDFit = sd(dFit)) %>%
+  mutate(Parameter = 'Population size')
+
+ggplot(t3.pop,aes(y = RangeFit, x = Population, color = Population)) + 
+  geom_boxplot() +
+  ylab("Relative importance") +
+  theme(legend.position = 'none')
+
+# Phenotype and fitness at generation x
+t4.pop <- control.ss %>% 
+  filter(GenNorm %in% c(20, 50, 100), EN == 'without El Nino') %>%
+  select(K, GenNorm, Population, Phenotype, Fitness, no) %>%
+  group_by(GenNorm, Population, no) %>%
+  summarize(RangePht = max(Phenotype) - min(Phenotype),
+            sdPht = sd(Phenotype),
+            RangeFit = max(Fitness) - min(Fitness),
+            sdFit = sd(Fitness)) %>%
+  ungroup() %>%
+  mutate(Parameter = 'Population size',
+         GenNorm2 = (factor(GenNorm, labels = c('20 generations post warming', '50 generations post warming', '100 generations post warming'))))
+
+ggplot(t4.pop, aes(x = Population, y = sdFit, color = Population, )) +
+  geom_boxplot() + 
+  facet_wrap(~GenNorm2) +
+  ylab('Standard deviation of fitness values') +
+  theme(legend.position = 'none')
+```
+
+
+### Effect of number of genes
+```{r Pace and scope - Effect of number of genes, fig.dim=c(10, 5), cache = T}
+control.ss <- controlIM1 %>%
+  filter(K == 10000, S == 100, U %in% c(1000,  500,  200,  100,   50), MS == 0.01, I == 0.5, mr == 0, aIoC == 50, Population != 6, WoFF == 0.1) %>%
+  mutate(Generation = as.numeric(Generation),
+         Population = as.factor(Population),
+         MS = as.numeric(MS),
+         IM = as.factor(IM),
+         EN = factor(EN, labels = c("with El Nino", "without El Nino")),
+         GenNorm = Generation-(burnin+100)) %>%
+  mutate_if(is.character, as.factor) %>%
+  filter(GenNorm %in% c(0:100)) %>%
+  droplevels()
+
+ss2 <- control.ss %>% filter(me == 0.01, U == 200)
+control.ss <- control.ss %>% filter(!id %in% ss2$id)
+
+ggplot(control.ss, aes(GenNorm, Phenotype)) +
+  geom_line(aes(color = Population, group = interaction(no, Population)), alpha = 0.3) +
+  theme_bw() +
+  xlab("Generations since warming") +
+  ylab("Mean population phenotype") +
+  facet_grid(EN~U) +
+  geom_vline(xintercept = 0, linetype = 'dotted', alpha = 0.4) +
+  theme(legend.position = 'bottom')
+
+#The effect on mean population fitness by generation 20, 50 and 100 after warming
+t1 <- control.ss %>%
+    filter(GenNorm %in% c(20, 50, 100), EN == 'without El Nino') %>%
+    mutate(GenNorm2 = (factor(GenNorm, labels = c('20 generations post warming', '50 generations post warming', '100 generations post warming')))) %>%
+    group_by(GenNorm2, U, Population, no) %>%
+    summarize(mPht = ((Phenotype)), mFit = ((Fitness)))
+
+(ASme <- ggplot(t1, aes(U, mFit, color = Population, group = interaction(Population,no))) +
+  geom_line(alpha = 0.3) +
+  facet_wrap(~GenNorm2) +
+  xlab('Number of genes') +
+  ylab("Mean population fitness") +
+  ggtitle("The effect of the no. of genes on mean population fitness") +
+  guides(color = guide_legend(override.aes = list(alpha = 0.8))) +
+    scale_x_continuous(breaks = unique(t1$U)) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)))
+
+# Some specific values mentioned in the manuscript:
+t1 %>% group_by(U, Population) %>%
+  summarize('Mean fitness' = mean(mFit), 'SD fitness' = sd(mFit)) %>%
+  rename('#QTL' = 'U') %>%
+  kable(align = 'c')
+
+# Fitness change in 20 years after warming
+t2 <- control.ss %>%
+    filter(GenNorm %in% c(0, 20), EN == 'without El Nino') %>%
+    mutate(GenNorm = factor(GenNorm, labels = c('t1', 't2'))) %>%
+    select(U, GenNorm, Population, Phenotype, Fitness, no) %>%
+    pivot_wider(names_from = GenNorm, values_from = c(Phenotype, Fitness)) %>%
+    mutate(dPht = Phenotype_t2-Phenotype_t1, dFit = Fitness_t2 - Fitness_t1)
+
+(FDME <- ggplot(t2, aes(U, dFit, color = Population)) +
+  geom_line(aes(group = interaction(Population,no)), alpha = 0.5)  +
+    xlab('Number of genes') +
+    ylab("Fitness change in 20 years of warming") +
+    scale_x_continuous(breaks = unique(t1$U)) +
+    guides(color = guide_legend(override.aes = list(alpha = 0.8))) +
+  ggtitle("The effect of the no. of genes on adaptation rate"))
+
+# Some specific values mentioned in the manuscript:
+t2 %>% group_by(U) %>%
+  summarize('Mean fitness' = mean(dFit), 'SD fitness' = sd(dFit)) %>%
+    rename('#QTL' = 'U') %>%
+  kable(align = 'c')
+
+# Relative importance for pace of adaptation
+t3.me <- t2 %>%
+  group_by(Population, no) %>%
+  summarize(RangePht = max(dPht) - min(dPht), 
+            SDPht = sd(dPht),
+            RangeFit = max(dFit) - min(dFit), 
+            SDFit = sd(dFit)) %>%
+  mutate(Parameter = 'Number of genes')
+
+ggplot(t3.me,aes(y = RangeFit, x = 'Number of genes', color = Population)) + 
+  geom_boxplot() +
+  xlab("") +
+  ylab("Relative importance") +
+  theme(axis.text.x = element_text(angle = 90))
+
+# Phenotype and fitness at generation 20, 50, 100
+t4.me <- control.ss %>% 
+  filter(GenNorm %in% c(20, 50, 100), EN == 'without El Nino') %>%
+  select(me, GenNorm, Population, Phenotype, Fitness, no) %>%
+  group_by(GenNorm, Population, no) %>%
+  summarize(RangePht = max(Phenotype) - min(Phenotype),
+            sdPht = sd(Phenotype),
+            RangeFit = max(Fitness) - min(Fitness),
+            sdFit = sd(Fitness)) %>%
+  ungroup() %>%
+  mutate(Parameter = 'Number of genes',
+         GenNorm2 = (factor(GenNorm, labels = c('20 generations post warming', '50 generations post warming', '100 generations post warming'))))
+
+
+ggplot(t4.me, aes(x = Population, y = sdFit, color = Population, )) +
+  geom_boxplot() + 
+  facet_wrap(~GenNorm2) +
+  ylab('Standard deviation of fitness values') +
+  theme(legend.position = 'none')
+```
+
+
+### Effect of mutation rate
+```{r Pace and scope - Effect of mutations rate, fig.dim=c(10, 5), cache = T}
+control.ss <- controlIM1 %>%
+  filter(K == 10000, U == 100, S == 100, MS == 0.01, me == 0.01, I == 0.5, Population != 6, aIoC == 50, mr != 0.001, WoFF == 0.1) %>%
+  mutate(Generation = as.numeric(Generation),
+         Population = as.factor(Population),
+         mr = as.numeric(mr),
+         MS = as.numeric(MS),
+         IM = as.factor(IM),
+         EN = factor(EN, labels = c("with El Nino", "without El Nino")),
+         GenNorm = Generation-(burnin+100)) %>%
+  mutate_if(is.character, as.factor) %>%
+  filter(GenNorm %in% c(0:100)) %>%
+  droplevels()
+
+ggplot(control.ss, aes(GenNorm, Phenotype)) +
+  geom_line(aes(color = Population, group = interaction(no, Population)), alpha = 0.3) +
+  theme_bw() +
+  xlab("Generations since warming") +
+  ylab("Mean population phenotype") +
+  facet_grid(EN~mr) +
+  geom_vline(xintercept = 0, linetype = 'dotted', alpha = 0.4) +
+  theme(legend.position = 'bottom')
+
+#The effect on mean population fitness by generation 20, 50 and 100 after warming
+t1 <- control.ss %>%
+    filter(GenNorm %in% c(20, 50, 100), EN == 'without El Nino') %>%
+    mutate(GenNorm2 = (factor(GenNorm, labels = c('20 generations post warming', '50 generations post warming', '100 generations post warming')))) %>%
+    group_by(GenNorm2, mr, Population, no) %>%
+    summarize(mPht = ((Phenotype)), mFit = ((Fitness)))
+
+(ASmr <- ggplot(t1, aes(mr, mFit, color = Population, group = interaction(Population,no))) +
+  geom_line(alpha = 0.3) +
+  facet_wrap(~GenNorm2) +
+  xlab('Mutation rate') +
+  ylab("Mean population fitness") +
+  ggtitle("The effect of mutation rate on mean population fitness") +
+  guides(color = guide_legend(override.aes = list(alpha = 0.8))) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)))
+
+# Fitness change in 20 years after warming
+t2 <- control.ss %>%
+    filter(GenNorm %in% c(0, 20), EN == 'without El Nino') %>%
+    mutate(GenNorm = factor(GenNorm, labels = c('t1', 't2'))) %>%
+    select(mr, GenNorm, Population, Phenotype, Fitness, no) %>%
+    pivot_wider(names_from = GenNorm, values_from = c(Phenotype, Fitness)) %>%
+    mutate(dPht = Phenotype_t2-Phenotype_t1, dFit = Fitness_t2 - Fitness_t1)
+
+ggplot(t2, aes(mr, dFit, color = Population)) +
+  geom_line(aes(group = interaction(Population,no)), alpha = 0.5)  +
+    xlab('Mutation rate') +
+    ylab("Fitness change in 20 years of warming") +
+    guides(color = guide_legend(override.aes = list(alpha = 0.8))) +
+  ggtitle("The effect of mutation rate on adaptation rate")
+
+# Relative importance for pace of adaptation
+t3.mr <- t2 %>%
+  group_by(Population, no) %>%
+  summarize(RangePht = max(dPht) - min(dPht), 
+            SDPht = sd(dPht),
+            RangeFit = max(dFit) - min(dFit), 
+            SDFit = sd(dFit)) %>%
+  mutate(Parameter = 'Mutation rate')
+
+ggplot(t3.mr,aes(y = RangeFit, x = Population, color = Population)) + 
+  geom_boxplot() +
+  ylab("Relative importance") +
+  theme(legend.position = 'none')
+
+# Phenotype and fitness at generation 20, 50, 100
+t4.mr <- control.ss %>% 
+  filter(GenNorm %in% c(20, 50, 100), EN == 'without El Nino') %>%
+  select(mr, GenNorm, Population, Phenotype, Fitness, no) %>%
+  group_by(GenNorm, Population, no) %>%
+  summarize(RangePht = max(Phenotype) - min(Phenotype),
+            sdPht = sd(Phenotype),
+            RangeFit = max(Fitness) - min(Fitness),
+            sdFit = sd(Fitness)) %>%
+  ungroup() %>%
+  mutate(Parameter = 'Mutation rate',
+         GenNorm2 = (factor(GenNorm, labels = c('20 generations post warming', '50 generations post warming', '100 generations post warming'))))
+
+ggplot(t4.mr, aes(x = Population, y = sdFit, color = Population, )) +
+  geom_boxplot() + 
+  facet_wrap(~GenNorm2) +
+  ylab('Standard deviation of fitness values') +
+  theme(legend.position = 'none')
+```
+
+
+### Summary figures for pace and scope of natural adaptation (Fig 1., Supplementary fig. 8 and 9)
+```{r Pace and scope - Summary figures, fig.dim=c(10, 10), cache = T}
+FDME + FDCON + FDDIV + FDWOFF + plot_annotation(tag_levels = 'A') + plot_layout(guides = 'collect') & theme(legend.position = 'bottom')
+ggsave("../Figures/S8.png", width = 10, height = 8, dpi = 300)
+
+ASdiv + ASme + ASmr + ASwoff  + plot_annotation(tag_levels = 'A') + plot_layout(ncol = 1, guides = 'collect') & theme(legend.position = 'bottom')
+ggsave("../Figures/S9.png", width = 8, height = 12, dpi = 300)
+
+df <- rbind(t3.con, t3.woff, t3.div, t3.pop, t3.me, t3.mr)
+
+p1 <- ggplot(df,aes(y = SDFit, x = reorder(Parameter, -SDFit), color = Population, group = interaction(Population, Parameter))) + 
+  geom_boxplot() +
+  theme_bw() +
+  xlab("") +
+  ylab("Relative importance for adaptation rate (fitness)")+
+  xlab("") +
+  scale_y_continuous(limits = c(0, 0.25)) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1), legend.position = c(0.8,0.7))
+
+# Some values discussed in the manuscript
+# Relative importance of parameters on rate of adaptation
+df %>% 
+  group_by(Parameter, Population) %>%
+  summarize('Mean fitness' = mean(SDFit), 'SD fitness' =sd(SDFit)) %>%
+  kable(align = 'lccc')
+
+# Averaged across populations
+df %>% 
+  group_by(Parameter) %>%
+  summarize('Mean fitness' = mean(SDFit), 'SD fitness' =sd(SDFit)) %>%
+  kable(align = 'lccc')
+
+df2 <- rbind(t4.con, t4.woff, t4.div, t4.pop, t4.me, t4.mr) %>%
+  ungroup() %>%
+  mutate(GenNorm2 = (factor(GenNorm, labels = c('20 generations post warming', '50 generations post warming', '100 generations post warming'))))
+
+p2 <- ggplot(df2, aes(reorder(Parameter, -sdFit), y = sdFit, color = Population, group = interaction(Population, Parameter))) +
+  geom_boxplot() + 
+  facet_wrap(~GenNorm2) + 
+  ylab("Relative importance for achieved fitness")+
+    scale_y_continuous(limits = c(0, 0.4)) +
+    xlab("")+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+p1+p2 + plot_layout(widths = c(1, 3), guides = 'collect') + plot_annotation(tag_levels = 'A')
+
+#As much as we like boxplots, they are too tiny on this graph, so we will just plot the 'raw' data with transparent points instead.
+# summary(df)
+df$nP <- str_wrap(df$Parameter, width = 10)
+p1B <- ggplot(df,aes(y = SDFit, x = reorder(nP, -SDFit), color = Population, group = interaction(Population, nP))) + 
+  geom_point(alpha = 0.1, position = position_dodge(width = 0.5), size = 2) +
+  theme_bw() +
+  xlab("") +
+  ylab(expression(atop("Relative importance for",paste('adaptation rate (', Delta, ' fitness)')))) + 
+  xlab("") +
+  scale_y_continuous(limits = c(0, 0.25)) +
+  theme(legend.position = 'none')
+
+# summary(df2)
+df2$nP <- str_wrap(df2$Parameter, width = 10)
+p2B <- ggplot(df2, aes(reorder(nP, -sdFit), y = sdFit, color = Population, group = interaction(Population, nP))) +
+  geom_point(alpha = 0.1, position = position_dodge(width = 0.5), size = 2) +
+  facet_wrap(~GenNorm2, ncol = 1) + 
+  ylab("Relative importance for mean population fitness")+
+    scale_y_continuous(limits = c(0, 0.4)) +
+    xlab("") +
+    guides(color = guide_legend(override.aes = list(alpha = 1))) +
+  theme(legend.position = 'bottom')
+
+p1B/p2B + plot_layout(heights = c(1, 3)) + plot_annotation(tag_levels = 'A')
+ggsave(filename = '../Figures/Fig1.png', width = 6, height = 10, scale = 1, dpi = 300)
+
+# What are the numbers?
+# Relative importance of parameters on scope of adaptation
+df2 %>% 
+  group_by(Parameter, GenNorm2) %>%
+  summarize('Mean fitness' = mean(sdFit), 'SD fitness' =sd(sdFit)) %>%
+  rename("Generations after warming" = GenNorm2) %>%
+  kable(align = 'lccc')
+```
+
+
+### Guiding figures (Fig. 4, Supplementary fig. 7)
+```{r Pace and scope - Guiding figures, fig.dim=c(10, 10), cache = T}
+control.ss <- controlIM1 %>%
+  filter(K == 10000, U == 100, S == 100, MS == 0.01, me == 0.01, I == 0.5, Population != 6, aIoC == 50, mr != 0.001, WoFF == 0.1, mr == 0) %>%
+  mutate(Generation = as.numeric(Generation),
+         Population = as.factor(Population),
+         mr = as.numeric(mr),
+         MS = as.numeric(MS),
+         IM = as.factor(IM),
+         EN = factor(EN, labels = c("with El Nino", "without El Nino")),
+         GenNorm = Generation-(burnin+100),
+         GenWarm = Generation - (burnin+100)) %>%
+   mutate_if(is.character, as.factor) %>%
+   filter(GenWarm %in% c(-2:150)) %>%
+   droplevels()
+
+ggplot(control.ss, aes(GenWarm, Phenotype)) +
+  geom_line(aes(color = Population, group = interaction(no, Population)), alpha = 0.3) +
+  theme_bw() +
+  xlab("Generations since warming") +
+  ylab("Mean population phenotype") +
+  facet_wrap(~EN, ncol = 1) +
+  scale_x_continuous(breaks = c(0, 20, 50, 100, 150)) +
+  geom_vline(xintercept = c(20, 50, 100), linetype = 'dotted', alpha = 0.4) +
+  theme(legend.position = 'bottom')
+
+# For Figure 4 we only need the 'with El Nino' version
+pG <- control.ss %>%
+  filter(EN == 'with El Nino') %>%
+  ggplot(aes(GenWarm, Phenotype)) +
+  geom_line(aes(color = Population, group = interaction(no, Population)), alpha = 0.3) +
+  theme_bw() +
+  xlab("Generations since warming") +
+  ylab("Mean population phenotype") +
+  scale_x_continuous(breaks = c(0, 20, 50, 100, 150)) +
+  geom_vline(xintercept = c(20, 50, 100), linetype = 'dotted', alpha = 0.4) +
+  theme(legend.position = c(0.88, 0.45), legend.background = element_rect(fill = 'transparent', color = NA), legend.key = element_rect(fill = 'transparent', color = NA)) +
+  guides(color = guide_legend(override.aes = list(alpha = 1)))
+
+
+#We will com e back to this.
+
+# For supplementary figure 7. we will need to make the same plot with different mutation effects
+control.ss <- controlIM1 %>%
+  filter(K == 10000, U %in% c(1000,  500,  200,  100,   50), S == 100, MS == 0.01, I == 0.5, Population != 6, aIoC == 50, mr != 0.001, WoFF == 0.1, mr == 0, EN == 0, Population %in% c(1,5)) %>%
+  mutate(Generation = as.numeric(Generation),
+         Population = as.factor(Population),
+         mr = as.numeric(mr),
+         me = as.factor(me),
+         U = as.factor(U),
+         MS = as.numeric(MS),
+         IM = as.factor(IM),
+         GenNorm = Generation-(aIoC+burnin+100),
+         GenWarm = Generation - (burnin+100),
+         ENSO = Optimum+Climate) %>%
+  mutate_if(is.character, as.factor) %>%
+  filter(GenWarm %in% c(-10:150)) %>%
+  droplevels()
+
+ss2 <- control.ss %>% filter(me == 0.01, U == 200)
+# unique(ss2$U)
+control.ss <- control.ss %>% filter(!id %in% ss2$id) %>%
+  select(U, GenWarm, Population, Phenotype, no) %>%
+  pivot_wider(names_from = Population, values_from = Phenotype)
+
+(pU <- ggplot(control.ss) +
+  geom_ribbon(aes(x = GenWarm, ymin = `5`, ymax = `1`, fill = U, group = interaction(no, U)), alpha = 0.02) +
+  geom_line(data = ss2, aes(x = GenWarm, y = ENSO, group = Population), alpha = 0.3, linetype = 'dotted') +
+  theme_bw() +
+  xlab("Generations since warming") +
+  ylab("Mean population phenotype") +
+  scale_x_continuous(breaks = c(0, 20, 50, 100, 150)) +
+  geom_vline(xintercept = c(20, 50, 100), linetype = 'dotted', alpha = 0.4) +
+  theme(legend.position = c(0.12, 0.6), legend.background = element_rect(fill = 'transparent', color = NA))+
+  guides(fill = guide_legend(override.aes = list(alpha = 0.2), title = 'number of QTLs')) +
+  ggtitle("A"))
+
+# And now let's plot the allele frequencies
+muts <- Model5[[2]]
+muts <- keep(muts, ~nrow(.x) > 0)
+# I have to split the mutations object in two because otherwise it is too big for the memory (and unnecessarily, with all the empty columns)
+muts250.list <- keep(muts, ~ncol(.x)<250)
+muts250 <- do.call('bind_rows', muts250.list)
+
+m1 <- muts250 %>%
+  mutate(across(contains("M\\d"), str_trim),
+         across(contains("M\\d"), as.numeric)) %>%
+  pivot_longer(cols = matches("M\\d"), names_to = 'Mutation', values_to = 'MutCount') %>%
+  mutate(ChNo = (Popsize)*2,
+         Locus = parse_number(Mutation),
+         AF = MutCount/ChNo,
+         Fixed = as.factor(ifelse(AF %in% c(0,1), 'F', 'A'))) %>%
+  filter(Population != 6, complete.cases(.))
+
+mutsO250.list <- keep(muts, ~ncol(.x)>=250)
+mutsO250 <- do.call('bind_rows', mutsO250.list)
+
+m2 <- mutsO250 %>%
+  mutate(across(contains("M\\d"), str_trim),
+         across(contains("M\\d"), as.numeric)) %>%
+  pivot_longer(cols = matches("M\\d"), names_to = 'Mutation', values_to = 'MutCount') %>%
+  mutate(ChNo = (Popsize)*2,
+         Locus = parse_number(Mutation),
+         AF = MutCount/ChNo,
+         Fixed = as.factor(ifelse(AF %in% c(0,1), 'F', 'A'))) %>%
+  filter(Population != 6, complete.cases(.))
+
+params2 <- params %>% mutate(id = str_trim(id))
+m12 <- rbind(m1, m2) %>% left_join(params2)
+
+cMuts <- m12 %>%
+  filter(IM == 0,
+         AGV == 0) %>%
+  mutate(AGV = -1)
+
+cMuts1 <- cMuts %>%
+  filter(K == 10000, U == 100, S == 100, MS == 0.01, me == 0.01, I == 0.5, Population != 6, aIoC == 50, mr != 0.001, WoFF == 0.1, mr == 0, EN == 0) %>%
+  mutate(Generation = as.numeric(Generation),
+         mr = as.numeric(mr),
+         me = as.factor(me),
+         MS = as.numeric(MS),
+         IM = as.factor(IM),
+         GenNorm = Generation-(aIoC+burnin+100),
+         GenWarm = Generation - (burnin+100),
+         Population = as.factor(paste0('Population ', Population))) %>%
+  mutate_if(is.character, as.factor) %>%
+  filter(GenWarm %in% c(0, 20, 50, 100, 150)) %>%
+  droplevels()
+
+# For one generation
+cMuts2 <- cMuts1 %>%
+  filter (Generation == min(Generation))
+ggplot(cMuts2, aes(Locus, AF)) +
+  geom_col() +
+  theme_classic()+
+  facet_wrap(~Population, ncol = 1, strip.position = 'right') +
+  ylab("Frequency of derived allele")
+
+#Populations combined for each generation
+cMuts3 <- cMuts1 %>%
+  group_by(GenWarm, Locus) %>%
+  summarise(mAF = sum(MutCount)/100000)
+
+(pG2 <- ggplot(cMuts3, aes(Locus, mAF)) +
+  geom_col(fill = 'black', color = 'black') +
+  theme_classic()+
+  facet_wrap(~GenWarm, nrow = 1) +
+  ylab("Frequency of\nderived allele") +
+  theme(strip.text = element_text(size = 8)))
+
+# Combine pG and pG2 to make Figure 4
+pG + pG2  + plot_layout(heights = c(2,1))
+ggsave("../Figures/Fig4.png", dpi = 300, width= 8, height = 4)
+
+
+#How about at different numbers of genes?
+cMuts4 <- cMuts %>%
+  filter(K == 10000, S == 100, U %in% c(1000,  500,  200,  100,   50), MS == 0.01, I == 0.5, mr == 0, aIoC == 50, Population != 6, WoFF == 0.1, EN == 0) %>%
+  mutate(Generation = as.numeric(Generation),
+         mr = as.numeric(mr),
+         me = as.factor(me),
+         U = as.factor(U),
+         MS = as.numeric(MS),
+         IM = as.factor(IM),
+         GenNorm = Generation-(aIoC+burnin+100),
+         GenWarm = Generation - (burnin+100),
+         Population = as.factor(paste0('Population ', Population))) %>%
+  mutate_if(is.character, as.factor) %>%
+  filter(GenWarm %in% c(0, 20, 50, 100, 150)) %>%
+  droplevels()
+
+cMuts_drop <- cMuts4 %>% filter(me == 0.01, U == 200)
+
+cMuts4<- cMuts4 %>% filter(!id %in% cMuts_drop$id)
+cMuts5 <- cMuts4 %>%
+  group_by(U, GenWarm, Locus) %>%
+  summarise(mAF = sum(MutCount)/100000)
+
+# We will not use this figure but we can make it anyways:
+pU2 <- ggplot(cMuts5, aes(Locus, mAF)) +
+  geom_col(fill = 'black', color = 'black') +
+  theme_classic()+
+  facet_grid(GenWarm~U, scales = "free_x") +
+  ylab("Frequency of derived allele") +
+  theme(strip.text = element_text(size = 6))
+
+# Instead, we will flip the axes
+# but unfortunately scale = 'free-x' doesn't work when flipped, so one by one
+plotlist <- list()
+for (u in levels(cMuts5$U)) {
+  cMuts6 <- cMuts5 %>%
+  filter(U == u)
+  p <- ggplot(cMuts6, aes(Locus, mAF)) +
+    geom_col(fill = 'black', color = 'black') +
+    theme_classic()+
+    facet_grid(U~GenWarm, scales = "free_x") +
+    scale_y_continuous(limits = c(0,1)) +
+    ylab("") +
+    xlab("") +
+    theme(strip.background.x = element_blank(),
+          strip.text.x = element_blank(),
+          strip.text.y = element_text(size = 6))
+  plotlist[[as.character(u)]] <- p
+}
+
+plotlist[[3]] <- plotlist[[3]] + ylab("Frequency of derived allele")
+plotlist[[1]] <- plotlist[[1]] + theme(strip.text.x = element_text(size = 6), strip.background.x = element_rect()) + ggtitle("B")
+pU3 <- do.call(what = "wrap_plots", args = c(plotlist, ncol = 1)) +
+  xlab("Locus")
+
+pU + pU3  + plot_layout(heights = c(2,5))
+ggsave("../Figures/S7.png", dpi = 300, width = 10, height = 12)
+```
+  
+  
+  
+## Effect of genetic interventions in wild populations
+  
+### Effect of connectivity
+```{r Effect of connectivity, fig.dim=c(10,10), cache = T}
+ss1 <- sumsNew %>%
+  filter(K == 10000, I == 0.5, S == 100, U == 100, me == 0.01, mr == 0, aIoC == 50, Population != 6, WoFF == 0.1) %>%
+  mutate(Generation = as.numeric(Generation),
+         Population = as.factor(Population),
+         MS = as.numeric(MS),
+         IM = as.factor(IM),
+         AGV2 = factor(AGV, labels = c('Scenario 1', 'Scenario 2', 'Scenario 3')),
+         AGV = factor(AGV, labels = c("Scenario 1", "Scenario 2", "Scenario 3")),
+         EN = factor(EN, labels = c("with El Nino", "without El Nino")),
+         GenNorm = Generation-(aIoC+burnin+100),
+         MS = as.factor(paste0(MS *100, '%'))) %>%
+  mutate_if(is.character, as.factor) %>%
+  filter(GenNorm %in% c(-2:60)) %>%
+  droplevels()
+
+ggplot(ss1, aes(GenNorm, Phenotype)) +
+  geom_line(aes(color = Population, linetype = IM, group = interaction(no, Population, IM)), alpha = 0.99) +
+  scale_linetype_manual(values = c('dotted', 'solid', 'solid'), guide = F) +
+  theme_bw() +
+  xlab("Generations since intervention") +
+  ylab("Mean population phenotype") +
+  facet_grid(EN+AGV2~MS) +
+  geom_vline(xintercept = 0, linetype = 'dotted', alpha = 0.4) +
+  theme(legend.position = 'bottom')
+
+#Ok, now let's calculate the fitness effect
+FB <- ss1 %>%
+  select(GenNorm, Population, Fitness, IM, MS, EN, AGV2, no) %>%
+  pivot_wider(names_from = IM, names_prefix = 'IM', values_from = Fitness) 
+
+FB$FB <- ifelse(is.na(FB$IM1),  FB$IM2-FB$IM0, FB$IM1-FB$IM0)
+
+ggplot(FB, aes(GenNorm, FB, color = Population, group = interaction(no, Population))) +
+  geom_line(alpha = 0.3) +
+  theme_bw() +
+  facet_grid(EN+AGV2~MS) +
+  xlab("Generations since intervention") +
+  ylab("Mean fitness effect") +
+  theme(legend.position = 'bottom') +
+  guides(color = guide_legend(override.aes = list(alpha = 0.8))) +
+  ggtitle("The influence of connectivity on the fitness effect of interventions")
+#save it for supplementary materials
+ggsave("../Figures/S11.png", width = 10, height = 10)
+
+# Some specific values mentioned in the paper
+# What is the difference in fitness effect in the 2nd generation after intervention of a low and high connectivity simulation in scenario 1?
+FB %>% filter(AGV2 == 'Scenario 1', EN == 'with El Nino', Population == 4, MS %in% c("0.001%", "33%"), GenNorm == 2) %>%
+  group_by(GenNorm, MS) %>%
+  summarize(mFB = mean(FB)) %>%
+  pivot_wider(names_from = MS, values_from = mFB) %>%
+  mutate('Difference in fitness effect' = `0.001%`/`33%`) %>%
+  rename('Generations after intervention' = GenNorm) %>%
+  kable(align = 'c', digits = 3)
+
+# What is the difference in fitness effect in the 2nd generation after intervention of a low and high connectivity simulation in population 5 in scenario 3?
+FB %>% filter(AGV2 == 'Scenario 3', EN == 'with El Nino', Population == 5, MS %in% c("0.1%", "1%", "10%"), GenNorm %in% 2, no ==1) %>% 
+  select(MS, FB) %>%
+  pivot_wider(names_from = MS, values_from = FB) %>% 
+  mutate(`1%/0.1%` = `1%`/`0.1%`,
+         `1%/10%` = `1%`/`10%`) %>%
+  kable(align = 'c', digits = 1)
+
+# What is the difference in fitness effect in the 60th generation after intervention of a low and high connectivity simulation in population 1 in scenario 3?
+FB %>% filter(AGV2 == 'Scenario 3', EN == 'with El Nino', Population == 1, MS %in% c("1%", "10%"), GenNorm %in% 60, no ==1) %>% 
+  select(MS, FB) %>%
+  pivot_wider(names_from = MS, values_from = FB) %>% 
+  mutate(`10%/1%` = `10%`/`1%`) %>%
+  kable(align = 'c', digits = 1)
+
+# create objects on the relative importance of teh parameter for final compound figure
+FBcon <- FB %>%
+  select(EN, AGV2, GenNorm, Population, MS, FB, no) %>%
+  filter(GenNorm %in% c(0, 1, 2, 3, 4, 5, 10))
+
+# Some fun plots
+ggplot(FBcon,aes(MS, FB)) +
+  geom_line(aes(color = Population, group = interaction(no, Population)), alpha = 0.3) +
+  theme_bw() +
+  xlab("Connectivity rate") +
+  ylab("Fitness effect") +
+  facet_grid(EN+AGV2~GenNorm) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = 'bottom')
+
+ggplot(FBcon,aes(y = FB, x = 1, color = Population)) +
+  geom_boxplot() +
+  theme_bw() +
+  xlab("") +
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(),
+        legend.position = 'bottom') +
+  ylab("Fitness effect") +
+  facet_grid(EN+AGV2~GenNorm)
+
+# The most influential variables will have a bigger standard deviation among simulations with different parameter values
+
+# Let's summarize the influence in an object that we plot with other parameters later
+dfCon <- FBcon %>%
+  filter(GenNorm == 1,
+         AGV2 == 'Scenario 1',
+         EN == 'with El Nino',
+         Population == 4)%>%
+  mutate(Parameter = 'Connectivity') %>%
+  rename(Values = MS)
+```
+  
+  
+### Effect of genetic diversity
+Genetic diversity is tricky, because it was manipulated via the number of loci while keeping the mutation effect constant at 0.01. So we need to do some elaborate subsetting to get the dataset we want to work with.  
+```{r Effect of genetic diversity, fig.dim=c(10,10), cache = T}
+ss1 <- sumsNew %>%
+  filter(K == 10000, I == 0.5, S == 100, !U %in% c(50, 150, 200), MS == 0.01, me == 0.01, mr == 0, aIoC == 50, Population != 6, WoFF == 0.1) %>%
+  mutate(Generation = as.numeric(Generation),
+         Population = as.factor(Population),
+         U = as.numeric(U),
+         IM = as.factor(IM),
+         AGV2 = factor(AGV, labels = c('Scenario 1', 'Scenario 2', 'Scenario 3')),
+         AGV = factor(AGV, labels = c("Scenario 1", "Scenario 2", "Scenario 3")),
+         EN = factor(EN, labels = c("with El Nino", "without El Nino")),
+         GenNorm = Generation-(aIoC+burnin+100)) %>%
+  mutate_if(is.character, as.factor) %>%
+  filter(GenNorm %in% c(-2:60)) %>%
+  droplevels()
+
+ggplot(ss1, aes(GenNorm, Phenotype)) +
+  geom_line(aes(color = Population, linetype = IM, group = interaction(no, Population, IM)), alpha = 0.3) +
+  scale_linetype_manual(values = c('dotted', 'solid', 'solid'), guide = F) +
+  theme_bw() +
+  xlab("Generations since intervention") +
+  ylab("Mean population phenotype") +
+  facet_grid(EN+AGV2~HeR) +
+  geom_vline(xintercept = 0, linetype = 'dotted', alpha = 0.4) +
+  theme(legend.position = 'bottom')
+
+#Ok, now let's calculate the fitness effect
+FB <- ss1 %>%
+  select(GenNorm, Population, Fitness, IM, AGV2, HeR, U, EN, no) %>%
+  pivot_wider(names_from = IM, names_prefix = 'IM', values_from = Fitness)
+FB$FB <- ifelse(is.na(FB$IM1),  FB$IM2-FB$IM0, FB$IM1-FB$IM0)
+
+ggplot(FB, aes(GenNorm, FB, color = Population, group = interaction(no, Population))) +
+  geom_line(alpha = 0.3) +
+  theme_bw() +
+  facet_grid(EN+AGV2~HeR) +
+  xlab("Generations since intervention") +
+  ylab("Mean fitness effect")+
+  theme(legend.position = 'bottom') +
+  guides(color = guide_legend(override.aes = list(alpha = 0.8))) +
+  ggtitle("The influence of genetic diversity on the fitness effect of interventions")
+
+#save it for supplementary materials
+ggsave("../Figures/S10.png", width = 10, height = 10)
+
+# create objects on the relative importance of teh parameter for final compound figure
+FBdiv <- FB %>%
+  select(EN, AGV2, GenNorm, Population, HeR, FB, no) %>%
+  filter(GenNorm %in% c(0, 1, 2, 3, 4, 5, 10))
+
+ggplot(FBdiv,aes(y = FB, x = 1, color = Population)) + 
+  geom_boxplot() +
+  #geom_violin() +
+  theme_bw() +
+  xlab("") +
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(),
+        legend.position = 'bottom') +
+  ylab("Fitness effect") +
+  facet_grid(EN+AGV2~GenNorm)
+
+dfDiv <- FBdiv %>%
+  filter(GenNorm == 1,
+         AGV2 == 'Scenario 1',
+         EN == 'with El Nino',
+         Population == 4)%>%
+  mutate(Parameter = 'Diversity') %>%
+  rename(Values = HeR)
+
+#Some specific values mentioned in the manuscript
+FB %>% filter(AGV2 == 'Scenario 3', EN == 'with El Nino', Population == 4, HeR %in% c(0.06, 0.48), GenNorm == 2) %>% 
+  group_by(GenNorm, HeR) %>%
+  summarize(mFB = mean(FB)) %>%
+  pivot_wider(names_from = HeR, values_from = mFB) %>%
+  mutate('Difference in fitness effect' = `0.06`/`0.48`) %>%
+  kable(align = 'c', digits = 2)
+
+FB %>% filter(AGV2 == 'Scenario 3', EN == 'with El Nino', Population == 4, HeR %in% c(0.06, 0.48), GenNorm %in% c(1:10)) %>% 
+  group_by(HeR) %>%
+  summarize(mFB = mean(FB)) %>%
+  pivot_wider(names_from = HeR, values_from = mFB) %>%
+  mutate('Difference in fitness effect' = `0.06`-`0.48`) %>%
+  rename('He = 0.06' = `0.06`, 'He = 0.48' = `0.48`) %>%
+  kable(align = 'c', digits = 2, table.attr = "style='width:30%;'")
+```
+  
+  
+### Effect of environmental tolerance
+Environmental tolerance was approximated by the width (standard deviation) of the fitness function.  
+```{r Effect of environmental tolerance, fig.dim=c(10,10), cache = T}
+ss1 <- sumsNew %>%
+  filter(K == 10000, I == 0.5, S == 100, U == 100, me == 0.01, mr == 0, aIoC == 50, Population != 6, MS == 0.01, WoFF != 0.01) %>%
+  mutate(Generation = as.numeric(Generation),
+         Population = as.factor(Population),
+         MS = as.numeric(MS),
+         IM = as.factor(IM),
+         AGV2 = factor(AGV, labels = c('Scenario 1', 'Scenario 2', 'Scenario 3')),
+         AGV = factor(AGV, labels = c("Scenario 1", "Scenario 2", "Scenario 3")),
+         EN = factor(EN, labels = c("with El Nino", "without El Nino")),
+         GenNorm = Generation-(aIoC+burnin+100)) %>%
+  mutate_if(is.character, as.factor) %>%
+  filter(GenNorm %in% c(-2:60)) %>%
+  droplevels()
+
+ggplot(ss1, aes(GenNorm, Phenotype)) +
+  geom_line(aes(color = Population, linetype = IM, group = interaction(no, Population, IM)), alpha = 0.99) +
+  scale_linetype_manual(values = c('dotted', 'solid', 'solid'), guide = F) +
+  theme_bw() +
+  xlab("Generations since intervention") +
+  ylab("Mean population phenotype") +
+  facet_grid(EN+AGV2~WoFF) +
+  geom_vline(xintercept = 0, linetype = 'dotted', alpha = 0.4) +
+  theme(legend.position = 'bottom')
+
+#Ok, now let's calculate the fitness effect
+FB <- ss1 %>%
+  select(GenNorm, Population, Fitness, IM, WoFF, EN, AGV2, no) %>%
+  pivot_wider(names_from = IM, names_prefix = 'IM', values_from = Fitness)
+FB$FB <- ifelse(is.na(FB$IM1),  FB$IM2-FB$IM0, FB$IM1-FB$IM0)
+
+ggplot(FB, aes(GenNorm, FB, color = Population, group = interaction(no, Population))) +
+  geom_line(alpha = 0.3) +
+  theme_bw() +
+  facet_grid(EN+AGV2~WoFF) +
+  xlab("Generations since intervention") +
+  ylab("Mean fitness effect")+
+  theme(legend.position = 'bottom')  +
+  guides(color = guide_legend(override.aes = list(alpha = 0.8))) +
+  ggtitle("The influence of environmental tolerance on the fitness effect of interventions")
+
+#save it for supplementary materials
+ggsave("../Figures/S13.png", width = 10, height = 10)
+
+# Some specific values mentioned in the manuscript
+# How many positive generations in scenario 3 at the extreme values of environmental tolerance?
+FB %>%
+  filter(AGV2 == 'Scenario 2', EN == 'with El Nino', Population == 4, WoFF %in% c(0.05, 0.3), GenNorm > 0) %>% #'Scenario 3' 'Scenario 1'
+  group_by(WoFF) %>%
+  summarize(positive = sum(FB>0), negative = sum(FB<0), zero = sum(FB == 0)) %>%
+  mutate('Percent of positive' = positive/6) %>%
+  rename('Environmental tolerance'= WoFF) %>%
+  kable(align = 'c', digits = 2)
+
+# How many times higher is the fitness effect at environmental tolerance level 0.3 vs 0.05 at the time of intervention?
+FB %>%  filter(EN == 'with El Nino', Population == 4, GenNorm %in% 0) %>% 
+  group_by(WoFF) %>%
+  summarize(mFB = mean(FB)) %>%
+  pivot_wider(names_from = WoFF, values_from = mFB) %>% 
+  mutate(`0.05/0.3%` = `0.05`/`0.3`) %>%
+  kable(align = 'c', digits = 2)
+
+# At what generation does the amplitude of the fitness ripple go below 0.01?  
+FB %>%  filter(EN == 'with El Nino', Population == 4, GenNorm > 0) %>%
+  group_by(AGV2, GenNorm, WoFF) %>%
+  summarize(mFB = mean(FB)) %>%
+  filter(abs(mFB) > 0.01) %>%
+  group_by(AGV2, WoFF) %>%
+  summarize(max(GenNorm))
+
+# create objects on the relative importance of teh parameter for final compound figure
+FBwoff <- FB %>%
+  select(EN, AGV2, GenNorm, Population, WoFF, FB, no) %>%
+  filter(GenNorm %in% c(0, 1, 2, 3, 4, 5, 10))
+ 
+ggplot(FBwoff,aes(WoFF, FB)) +
+  geom_line(aes(color = Population, group = interaction(no, Population)), alpha = 0.3) +
+  theme_bw() +
+  scale_x_log10() +
+  xlab("Environmental tolerance") +
+  ylab("Fitness effect") +
+  facet_grid(EN+AGV2~GenNorm) +
+  theme(legend.position = 'bottom')
+
+ggplot(FBwoff,aes(y = FB, x = 1, color = Population)) + 
+  geom_boxplot() +
+  #geom_violin() +
+  theme_bw() +
+  xlab("") +
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(),
+        legend.position = 'bottom') +
+  ylab("Fitness effect") +
+  facet_grid(EN+AGV2~GenNorm)
+
+dfWoFF <- FBwoff %>%
+  filter(GenNorm == 1,
+         AGV2 == 'Scenario 1',
+         EN == 'with El Nino',
+         Population == 4)%>%
+  mutate(Parameter = 'Environmental tolerance') %>%
+  rename(Values = WoFF)
+```
+  
+  
+##Effect of inoculum size
+```{r Effect of inocculum size, fig.dim=c(10,10), cache = T}
+ss1 <- sumsNew %>%
+  filter(K == 10000, U == 100, S == 100, MS == 0.01, me == 0.01, mr == 0, aIoC == 50, Population != 6, WoFF == 0.1) %>%
+  mutate(Generation = as.numeric(Generation),
+         Population = as.factor(Population),
+         I = as.numeric(I),
+         AGV2 = factor(AGV, labels = c('Scenario 1', 'Scenario 2', 'Scenario 3')),
+         AGV = factor(AGV, labels = c("Scenario 1", "Scenario 2", "Scenario 3")),
+         IM = as.factor(IM),
+         EN = factor(EN, labels = c("with El Nino", "without El Nino")),
+         GenNorm = Generation-(aIoC+burnin+100)) %>%
+  mutate_if(is.character, as.factor) %>%
+  filter(GenNorm %in% c(-2:60)) %>%
+  droplevels()
+
+ggplot(ss1, aes(GenNorm, Phenotype)) +
+  geom_line(aes(color = Population, linetype = IM, group = interaction(no, Population, IM)), alpha = 0.3) +
+  scale_linetype_manual(values = c('dotted', 'solid', 'solid'), guide = F) +
+  theme_bw() +
+  xlab("Generations since intervention") +
+  ylab("Mean population phenotype") +
+  facet_grid(EN+AGV2~I) +
+  geom_vline(xintercept = 0, linetype = 'dotted', alpha = 0.4) +
+  theme(legend.position = 'bottom')
+
+#Ok, now let's calculate the fitness effect
+FB <- ss1 %>%
+  select(GenNorm, Population, Fitness, IM, I, AGV2, EN, no) %>%
+  pivot_wider(names_from = IM, names_prefix = 'IM', values_from = Fitness)
+FB$FB <- ifelse(is.na(FB$IM1),  FB$IM2-FB$IM0, FB$IM1-FB$IM0)
+
+ggplot(FB, aes(GenNorm, FB, color = Population, group = interaction(no, Population))) +
+  geom_line(alpha = 0.3) +
+  theme_bw() +
+  facet_grid(EN+AGV2~I) +
+  xlab("Generations since intervention") +
+  ylab("Mean fitness effect")+
+  theme(legend.position = 'bottom') +
+  guides(color = guide_legend(override.aes = list(alpha = 0.8))) +
+  ggtitle("The influence of inoculation rate on the fitness effect of interventions")
+
+#save it for supplementary materials
+ggsave("../Figures/S14.png", width = 10, height = 10)
+
+# some specific values mentioned in the manuscript
+# What is the mean fitness benefit difference between a 10% and 80% inoculation?
+FB %>%
+  filter(I %in% c(0.1, 0.8), EN == 'with El Nino', Population == 4, GenNorm == 1) %>%
+  group_by(I, AGV2) %>%
+  summarise(mFB = mean(FB)) %>%
+  pivot_wider(names_from = I, values_from = mFB) %>% 
+  mutate(dif = `0.8`-`0.1`) %>%
+  summarize('Mean difference in fitness benefit' = mean(dif), 'SD of difference in fitness benefit' = sd(dif)) %>%
+  kable(align = 'c', caption = 'Difference in fitness benefit between 80% and 10% inoculation ratio')
+
+# At what generation does the amplitude of the fitness ripple go below 0.01?  
+FB %>%  filter(EN == 'with El Nino', Population == 4, GenNorm > 0) %>%
+  group_by(AGV2, GenNorm, I) %>%
+  summarize(mFB = mean(FB)) %>%
+  filter(abs(mFB) > 0.01) %>%
+  group_by(AGV2, I) %>%
+  summarize(max(GenNorm))
+
+# create objects on the relative importance of teh parameter for final compound figure
+FBino <- FB %>%
+  select(EN, AGV2, GenNorm, Population, I, FB, no) %>%
+  filter(GenNorm %in% c(0, 1, 2, 3, 4, 5, 10))
+
+ggplot(FBino,aes(y = FB, x = 1, color = Population)) + 
+  geom_boxplot() +
+  #geom_violin() +
+  theme_bw() +
+  xlab("") +
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(),
+        legend.position = 'bottom') +
+  ylab("Fitness effect") +
+  facet_grid(EN+AGV2~GenNorm)
+
+dfIno <- FBino %>%
+  filter(GenNorm == 1,
+         AGV2 == 'Scenario 1',
+         EN == 'with El Nino',
+         Population == 4)%>%
+  mutate(Parameter = 'Inoculum') %>%
+  rename(Values = I)
+```
+  
+  
+### Effect of population size
+```{r Effect of population size, fig.dim=c(10,10), cache = T}
+ss1 <- sumsNew %>%
+  filter(I == 0.5, U == 100, S == 100, MS == 0.01, me == 0.01, mr == 0, aIoC == 50, Population != 6, WoFF == 0.1) %>%
+  mutate(Generation = as.numeric(Generation),
+         Population = as.factor(Population),
+         K = as.numeric(K),
+         AGV2 = factor(AGV, labels = c('Scenario 1', 'Scenario 2', 'Scenario 3')),
+         AGV = factor(AGV, labels = c("Scenario 1", "Scenario 2", "Scenario 3")),
+         IM = as.factor(IM),
+         EN = factor(EN, labels = c("with El Nino", "without El Nino")),
+         GenNorm = Generation-(aIoC+burnin+100)) %>%
+  mutate_if(is.character, as.factor) %>%
+  filter(GenNorm %in% c(-2:60)) %>%
+  droplevels()
+
+ggplot(ss1, aes(GenNorm, Phenotype)) +
+  geom_line(aes(color = Population, linetype = IM, group = interaction(no, Population, IM)), alpha = 0.3) +
+  scale_linetype_manual(values = c('dotted', 'solid', 'solid'), guide = F) +
+  theme_bw() +
+  xlab("Generations since intervention") +
+  ylab("Mean population phenotype") +
+  facet_grid(EN+AGV2~K) +
+  geom_vline(xintercept = 0, linetype = 'dotted', alpha = 0.4) +
+  theme(legend.position = 'bottom')
+
+#Ok, now let's calculate the fitness effect
+FB <- ss1 %>%
+  select(GenNorm, Population, Fitness, IM, K, AGV2, EN, no) %>%
+  pivot_wider(names_from = IM, names_prefix = 'IM', values_from = Fitness)
+FB$FB <- ifelse(is.na(FB$IM1),  FB$IM2-FB$IM0, FB$IM1-FB$IM0)
+
+ggplot(FB, aes(GenNorm, FB, color = Population, group = interaction(no, Population))) +
+  geom_line(alpha = 0.3) +
+  theme_bw() +
+  facet_grid(EN+AGV2~K) +
+  xlab("Generations since intervention") +
+  ylab("Mean fitness effect")+
+  theme(legend.position = 'bottom')  +
+  guides(color = guide_legend(override.aes = list(alpha = 0.8))) +
+  ggtitle("The influence of population size on the fitness effect of interventions")
+
+# create objects on the relative importance of teh parameter for final compound figure
+FBpop <- FB %>%
+  select(EN, AGV2, GenNorm, Population, K, FB, no) %>%
+  filter(GenNorm %in% c(0, 1, 2, 3, 4, 5, 10))
+# when I run it on multiple no, I will be able to create boxplot per generation per MS
+
+ggplot(FBpop,aes(y = FB, x = 1, color = Population)) + 
+  geom_boxplot() +
+  #geom_violin() +
+  theme_bw() +
+  xlab("") +
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(),
+        legend.position = 'bottom') +
+  ylab("Fitness effect") +
+  facet_grid(EN+AGV2~GenNorm)
+
+dfPop <- FBpop %>%
+  filter(GenNorm == 1,
+         AGV2 == 'Scenario 1',
+         EN == 'with El Nino',
+         Population == 4)%>%
+  mutate(Parameter = 'Population Size') %>%
+  rename(Values = K)
+```
+
+
+#Effect of the number of QTLs
+This is quite tricky. Mutation effect size was manipulated in tandem with the number of loci to yield a constant maximum achievable phenotypic trait value, and hence no change in genetic diversity (see methods and supplementary material). Therefore subsetting is elaborate.
+```{r Effect of mutation effect size, fig.dim=c(10,10), cache = T}
+ss1 <- sumsNew %>%
+  filter(K == 10000, S == 100, U %in% c(1000,  500,  200,  100,   50), MS == 0.01, I == 0.5, mr == 0, aIoC == 50, Population != 6, WoFF == 0.1) %>%
+  #filter(K == 10000, U %in% c(800, 400, 160, 80, 40), S == 100, MS == 0.01, I == 0.5, mr == 0, aIoC == 50, Population != 6, WoFF == 0.1) %>%
+  mutate(Generation = as.numeric(Generation),
+         Population = as.factor(Population),
+         me = as.numeric(me),
+         AGV2 = factor(AGV, labels = c('Scenario 1', 'Scenario 2', rep('Scenario 3', 5))),
+         AGV = factor(AGV, labels = c("Scenario 1", "Scenario 2", rep("Scenario 3", 5))),
+         IM = as.factor(IM),
+         EN = factor(EN, labels = c("with El Nino", "without El Nino")),
+         GenNorm = Generation-(aIoC+burnin+100)) %>%
+  mutate_if(is.character, as.factor) %>%
+  filter(GenNorm %in% c(-2:60)) %>%
+  droplevels()
+
+ss2 <- ss1 %>% filter(me == 0.01, U == 200)
+ss1<- ss1 %>% filter(!id %in% ss2$id)
+
+ggplot(ss1, aes(GenNorm, Phenotype)) +
+  geom_line(aes(color = Population, linetype = IM, group = interaction(no, Population, IM)), alpha = 0.3) +
+  scale_linetype_manual(values = c('dotted', 'solid', 'solid'), guide = F) +
+  theme_bw() +
+  xlab("Generations since intervention") +
+  ylab("Mean population phenotype") +
+  facet_grid(EN+AGV2~U) +
+  geom_vline(xintercept = 0, linetype = 'dotted', alpha = 0.4) +
+  theme(legend.position = 'bottom')
+
+#Ok, now let's calculate the fitness effect
+FB <- ss1 %>%
+  select(GenNorm, Population, Fitness, IM, U, AGV2, EN, no) %>%
+  pivot_wider(names_from = IM, names_prefix = 'IM', values_from = Fitness)
+FB$FB <- ifelse(is.na(FB$IM1),  FB$IM2-FB$IM0, FB$IM1-FB$IM0)
+
+ggplot(FB, aes(GenNorm, FB, color = Population, group = interaction(no, Population))) +
+  geom_line(alpha = 0.3) +
+  scale_y_continuous(limits = c(-0.4, 1)) +
+  theme_bw() +
+  facet_grid(EN+AGV2~U) +
+  xlab("Generations since intervention") +
+  ylab("Mean fitness effect")+
+  theme(legend.position = 'bottom') +
+  guides(color = guide_legend(override.aes = list(alpha = 0.8))) +
+  ggtitle("The influence of the number of genes coding the trait on the fitness effect of interventions")
+
+#save it for supplementary materials
+ggsave("../Figures/S12.png", width = 10, height = 10)
+
+# Some specific values mentioned in the manuscript
+FB %>% filter(AGV2 == 'Scenario 2', EN == 'with El Nino', Population == 4, U %in% c(50, 1000), GenNorm == 2) %>% 
+  group_by(GenNorm, U) %>%
+  summarize(mFB = mean(FB)) %>%
+  pivot_wider(names_from = U, values_from = mFB) %>%
+  mutate('Proportional difference in fitness effect' = `50`/`1000`) %>%
+  rename('Generations after intervention' = GenNorm, 'Fitness effect for 50 QTLs' = `50`, 'Fitness effect for 1000 QTLs' = `1000`) %>%
+  kable(align = 'c')
+
+# create objects on the relative importance of teh parameter for final compound figure
+FBme <- FB %>%
+  select(EN, AGV2, GenNorm, Population, U, FB, no) %>%
+  filter(GenNorm %in% c(0, 1, 2, 3, 4, 5, 10))
+
+ggplot(FBme,aes(y = FB, x = 1, color = Population)) + 
+  geom_boxplot() +
+  #geom_violin() +
+  theme_bw() +
+  xlab("") +
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(),
+        legend.position = 'bottom') +
+  ylab("Fitness effect") +
+  facet_grid(EN+AGV2~GenNorm)
+
+dfMe <- FBme %>%
+  filter(GenNorm == 1,
+         AGV2 == 'Scenario 1',
+         EN == 'with El Nino',
+         Population == 4)%>%
+  mutate(Parameter = 'Number of genes') %>%
+  rename(Values = U)
+```
+  
+  
+### Effect of mutation rate
+```{r Effect of mutation rate, fig.dim=c(10,10), cache = T}
+ss1 <- sumsNew %>%
+  filter(K == 10000, U == 100, S == 100, MS == 0.01, me == 0.01, I == 0.5, Population != 6, aIoC == 50, mr != 0.001, WoFF ==0.1) %>%
+  mutate(Generation = as.numeric(Generation),
+         Population = as.factor(Population),
+         mr = as.numeric(mr),
+         AGV2 = factor(AGV, labels = c('Scenario 1', 'Scenario 2', 'Scenario 3')),
+         AGV = factor(AGV, labels = c("Scenario 1", "Scenario 2", "Scenario 3")),
+         IM = as.factor(IM),
+         EN = factor(EN, labels = c("with El Nino", "without El Nino")),
+         GenNorm = Generation-(aIoC+burnin+100)) %>%
+  mutate_if(is.character, as.factor) %>%
+  filter(GenNorm %in% c(-2:60)) %>%
+  droplevels()
+
+ggplot(ss1, aes(GenNorm, Phenotype)) +
+  geom_line(aes(color = Population, linetype = IM, group = interaction(no, Population, IM)), alpha = 0.3) +
+  scale_linetype_manual(values = c('dotted', 'solid', 'solid'), guide = F) +
+  theme_bw() +
+  xlab("Generations since intervention") +
+  ylab("Mean population phenotype") +
+  facet_grid(EN+AGV2~mr) +
+  geom_vline(xintercept = 0, linetype = 'dotted', alpha = 0.4) +
+  theme(legend.position = 'bottom')
+
+#Ok, now let's calculate the fitness effect
+FB <- ss1 %>%
+  select(GenNorm, Population, Fitness, IM, mr, AGV2, EN, no) %>%
+  pivot_wider(names_from = IM, names_prefix = 'IM', values_from = Fitness)
+FB$FB <- ifelse(is.na(FB$IM1),  FB$IM2-FB$IM0, FB$IM1-FB$IM0)
+
+ggplot(FB, aes(GenNorm, FB, color = Population, group = interaction(no, Population))) +
+  geom_line(alpha = 0.3) +
+  scale_y_continuous(limits = c(-0.5, 0.5)) +
+  theme_bw() +
+  facet_grid(EN+AGV2~mr) +
+  xlab("Generations since intervention") +
+  ylab("Mean fitness effect") +
+  guides(color = guide_legend(override.aes = list(alpha = 0.8))) +
+  ggtitle("The influence of mutation rate on the fitness effect of interventions") +
+  theme(legend.position = 'bottom')
+
+# create objects on the relative importance of teh parameter for final compound figure
+FBmr <- FB %>%
+  select(EN, AGV2, GenNorm, Population, mr, FB, no) %>%
+  filter(GenNorm %in% c(0, 1, 2, 3, 4, 5, 10))
+
+ggplot(FBmr,aes(y = FB, x = 1, color = Population)) + 
+  geom_boxplot() +
+  #geom_violin() +
+  theme_bw() +
+  xlab("") +
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(),
+        legend.position = 'bottom') +
+  ylab("Fitness effect") +
+  facet_grid(EN+AGV2~GenNorm)
+
+dfMr <- FBmr %>%
+  filter(GenNorm == 1,
+         AGV2 == 'Scenario 1',
+         EN == 'with El Nino',
+         Population == 4)%>%
+  mutate(Parameter = 'Mutation rate') %>%
+  rename(Values = mr)
+```
+  
+  
+### Effect of lab stock size
+```{r Effect of lab stock size, fig.dim=c(10,5), cache = T}
+ss1 <- sumsNew %>%
+  filter(K == 10000, U == 100, MS == 0.01, me == 0.01, AGV == -1, I == 0.5, Population != 6, mr == 0, aIoC == 50, WoFF == 0.1) %>%
+  mutate(Generation = as.numeric(Generation),
+         Population = as.factor(Population),
+         S = as.numeric(S),
+         AGV2 = factor(AGV, labels = c('Scenario 1')), #, 'Scenario 2', 'Scenario 3')),
+         AGV = factor(AGV, labels = c("Scenario 1")), # "Scenario 2", "Scenario 3")),
+         IM = as.factor(IM),
+         EN = factor(EN, labels = c("with El Nino", "without El Nino")),
+         GenNorm = Generation-(aIoC+burnin+100)) %>%
+  mutate_if(is.character, as.factor) %>%
+  filter(GenNorm %in% c(-2:60)) %>%
+  droplevels()
+
+ggplot(ss1, aes(GenNorm, Phenotype)) +
+  geom_line(aes(color = Population, linetype = IM, group = interaction(no, Population, IM)), alpha = 0.3) +
+  scale_linetype_manual(values = c('dotted', 'solid', 'solid'), guide = F) +
+  theme_bw() +
+  xlab("Generations since intervention") +
+  ylab("Mean population phenotype") +
+  facet_grid(EN~S) +
+  geom_vline(xintercept = 0, linetype = 'dotted', alpha = 0.4) +
+  theme(legend.position = 'bottom')
+
+#Ok, now let's calculate the fitness effect
+FB <- ss1 %>%
+  select(GenNorm, Population, Fitness, IM, S, AGV2, EN, no) %>%
+  pivot_wider(names_from = IM, names_prefix = 'IM', values_from = Fitness)
+FB$FB <- ifelse(is.na(FB$IM1),  FB$IM2-FB$IM0, FB$IM1-FB$IM0)
+
+ggplot(FB, aes(GenNorm, FB, color = Population, group = interaction(no, Population))) +
+  geom_line(alpha = 0.3) +
+  scale_y_continuous(limits = c(-0.2, 0.5)) +
+  theme_bw() +
+  facet_grid(EN~S) +
+  xlab("Generations since intervention") +
+  ylab("Mean fitness effect")+
+  theme(legend.position = 'bottom') +
+  guides(color = guide_legend(override.aes = list(alpha = 0.8))) +
+  ggtitle("The influence of stock size on the fitness effect of interventions")
+
+# create objects on the relative importance of teh parameter for final compound figure
+FBS <- FB %>%
+  select(EN, AGV2, GenNorm, Population, S, FB, no) %>%
+  filter(GenNorm %in% c(0, 1, 2, 3, 4, 5, 10))
+
+ggplot(FBS,aes(y = FB, x = 1, color = Population)) + 
+  geom_boxplot() +
+  #geom_violin() +
+  theme_bw() +
+  xlab("") +
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(),
+        legend.position = 'bottom') +
+  ylab("Fitness effect") +
+  facet_grid(EN~GenNorm)
+
+dfS <- FBS %>%
+  filter(GenNorm == 1,
+         EN == 'with El Nino',
+         AGV2 == 'Scenario 1',
+         Population == 4)%>%
+  mutate(Parameter = 'Stock size') %>%
+  rename(Values = S)
+```
+  
+  
+### Effect of El Nino-like oscillations
+```{r Effect of ENSO-like oscillations, fig.dim=c(10,10), cache = T}
+ss1 <- sumsNew %>%
+  filter(K == 10000, U == 100, S == 100, MS == 0.01, me == 0.01, I == 0.5, Population != 6, mr == 0, WoFF == 0.1) %>%
+  mutate(Generation = as.numeric(Generation),
+         Population = as.factor(Population),
+         aIoC = as.numeric(aIoC),
+         AGV2 = factor(AGV, labels = c('Scenario 1', 'Scenario 2', 'Scenario 3')),
+         AGV = factor(AGV, labels = c("Scenario 1", "Scenario 2", "Scenario 3")),
+         IM = as.factor(IM),
+         EN = factor(EN, labels = c("with El Nino", "without El Nino")),
+         GenNorm = Generation-(aIoC+burnin+100)) %>%
+  mutate_if(is.character, as.factor) %>%
+  filter(GenNorm %in% c(-2:60)) %>%
+  droplevels()
+
+ggplot(ss1, aes(GenNorm, Phenotype)) +
+  geom_line(aes(color = Population, linetype = IM, group = interaction(no, Population, IM)), alpha = 0.3) +
+  scale_linetype_manual(values = c('dotted', 'solid', 'solid'), guide = F) +
+  theme_bw() +
+  ylab("Mean population phenotype") +
+  xlab("Generations since intervention") +
+  facet_grid(EN+AGV2~aIoC) +
+  geom_vline(xintercept = 0, linetype = 'dotted', alpha = 0.4) +
+  theme(legend.position = 'bottom')
+
+#Ok, now let's calculate the fitness effect
+FB <- ss1 %>%
+  select(GenNorm, Population, Fitness, IM, aIoC, AGV2, EN, no) %>%
+  pivot_wider(names_from = IM, names_prefix = 'IM', values_from = Fitness) %>%
+  mutate(ENSO = aIoC-48,
+         ENSO2 = paste('Phase', ENSO))
+FB$FB <- ifelse(is.na(FB$IM1),  FB$IM2-FB$IM0, FB$IM1-FB$IM0)
+
+# We will store this figure for a composite figure that we make later
+(p0 <- FB %>%
+    filter(EN == 'with El Nino') %>%
+    ggplot(aes(GenNorm, FB, color = Population, group = interaction(no, Population))) +
+  geom_line(alpha = 0.3) +
+  theme_bw() +
+  facet_grid(AGV2~ENSO2) +
+  xlab("Generations since intervention") +
+  ylab("Mean fitness effect") +
+  theme(legend.position = 'bottom') +
+  guides(color = guide_legend(override.aes = list(alpha = 0.8))))
+
+# Now let's graph what the ENSO-like cycles look like
+sine <- (0.1*sin(seq(-1, 3, 0.01)*2*pi/5))
+gen <- seq(49, 53, 0.01)
+ENSO <- tibble(gen=gen-48, sine) %>%
+  left_join(.[gen %in% 49:53,], by = 'gen')
+p1 <- ggplot(ENSO, aes(gen, sine.x)) + 
+  geom_line() +
+  geom_point(aes(y = sine.y)) +
+  scale_x_continuous(breaks = 1:5) +
+    scale_y_continuous(breaks = c(-0.1, 0, 0.1)) +
+  ylab('ENSO-like\nanomaly') +
+  xlab('ENSO-like phase') +
+  geom_segment(aes(x = gen, xend = gen, y = -0.1, yend = sine.y), linetype = 'dashed')
+
+# Let's calculate the cumulative effect of interventions at different ENSO-like phases in the first 60 generations after intervention
+ENSOls <- list()
+for (g in seq(5, 60, by = 5)) {
+  valz <- FB %>%
+    filter(EN == 'with El Nino', Population == 4, GenNorm <= g) %>%
+    group_by(aIoC, AGV2, no) %>%
+    summarise(sumFB = sum(FB)) %>%
+    group_by(aIoC, AGV2) %>%
+    summarize(mFB = mean(sumFB), sdFB = sd(sumFB)) %>%
+    mutate(Generation = g)
+  ENSOls[[as.character(g)]] <- valz
+}
+valz <- do.call('rbind', ENSOls) %>%
+  mutate(ENSO = aIoC-48, 
+         ENSO2 = paste('Phase', ENSO))
+
+p2 <- ggplot(valz, aes(Generation, mFB, fill = AGV2)) + 
+  geom_ribbon(aes(ymin = mFB-sdFB, ymax = mFB+sdFB), alpha = 0.2) +
+  geom_line(aes(color = AGV2), linetype = 'dotted', alpha = 0.8) +
+  facet_wrap(~ENSO2, nrow = 1) +
+  geom_hline(yintercept = 0, linetype = 'dashed') +
+  ylab("Cumulative fitness effect") +
+  xlab("Generations since intervention") +
+  theme(legend.position = 'bottom', legend.title = element_blank())
+
+# Now let's create the compound figure as it appears in the manuscript
+p1/p0/p2 + plot_layout(heights = c(1, 3, 2)) + plot_annotation(tag_levels = 'A')
+
+ggsave('../Figures/Fig3.png', width = 10, height = 10, scale = 1, dpi = 300)
+
+# And get some specific values for comparison that are mentioned in the manuscript
+valz %>%
+  ungroup() %>%
+  filter(ENSO %in% c(2, 4), Generation == 20) %>%
+  select(ENSO, AGV2, mFB) %>%
+  pivot_wider(names_from = ENSO, values_from = mFB) %>%
+  mutate('Difference in fitness benefit' = `2`/`4`) %>%
+  rename(Scenario = AGV2, 'ENSO phase 2' = `2`, 'ENSO phase 4' = `4`) %>%
+  kable(align= 'lccc', digits = 2)
+
+# create objects on the relative importance of teh parameter for final compound figure
+FBaIoC <- FB %>%
+  select(EN, AGV2, GenNorm, Population, aIoC, FB, no) %>%
+  filter(GenNorm %in% c(0, 1, 2, 3, 4, 5, 10))
+
+ggplot(FBaIoC,aes(y = FB, x = 1, color = Population)) + 
+  geom_boxplot() +
+  theme_bw() +
+  xlab("") +
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(),
+        legend.position = 'bottom') +
+  ylab("Fitness effect") +
+  facet_grid(EN+AGV2~GenNorm)
+
+dfaIoC <- FBaIoC %>%
+  filter(GenNorm == 1,
+         AGV2 == 'Scenario 1',
+         EN == 'with El Nino',
+         Population == 4)%>%
+  mutate(Parameter = 'El Nino phase') %>%
+  rename(Values = 5)
+```
+
+
+### Quigley-plots in a batch  
+Quigley-plots show the relative importance of each parameter. We can make them in batches, separately for each intervention method with and without El Nino, using a for loop (alternatively we could write a function, of course, but I found this approach more transparent for the markdown). If you run this script it will save each plot separately. We will not do that here (eval = F). Instead, we will make a compound Quigley plot in the next section.
+```{r Quigley plots, fig.dim=c(10,10), eval=F, cache = T}
+for (e in levels(FBcon$EN)) {
+  for (a in levels(FBcon$AGV)) {
+    #for reshuffling and adding GV, S doesn't exist so we do it separately
+    if (a == 'Scenario 1') {
+      FBlist <- list(FBcon, FBdiv, FBwoff, FBino, FBme, FBmr, FBpop, FBaIoC, FBS)
+      names(FBlist) <- c('FBcon', 'FBdiv', 'FBwoff', 'FBino', 'FBme', 'FBmr', 'FBpop', 'FBaIoC', 'FBS')
+    } else {
+      FBlist <- list(FBcon, FBdiv, FBwoff, FBino, FBme, FBmr, FBpop, FBaIoC)
+      names(FBlist) <- c('FBcon', 'FBdiv', 'FBwoff', 'FBino', 'FBme', 'FBmr', 'FBpop', 'FBaIoC')
+    }
+    
+    ls <- list()
+    ls <- lapply(seq_along(FBlist), FUN = function(x) {
+      n <- names(FBlist)[[x]]
+      y <- FBlist[[x]] %>% 
+        filter(GenNorm == 1,
+               AGV == a,
+               EN == e,
+               Population == 4) %>%
+        mutate(Parameter = n) %>%
+        rename(Values = 5)
+      y
+    })
+    
+    df <- do.call(rbind, ls)
+    dfSum <- df %>%
+      group_by(Parameter, no) %>%
+      summarise(Range = max(FB)-min(FB), SD = sd(FB)) %>%
+      mutate(Parameter = as.factor(Parameter))
+    
+    if (a == 'Scenario 1') {
+      dfSum$Parameter <- factor(dfSum$Parameter, labels = c("El Nino phase", "Connectivity",  "Genetic diversity",  "Inoculum ratio",  "Mutation effect",   "Mutation rate",   "Population size",  "Broodstock size", "Width of fitness function"))
+    } else {
+      dfSum$Parameter <- factor(dfSum$Parameter, labels = c("El Nino phase", "Connectivity",  "Genetic diversity",  "Inoculum ratio",  "Mutation effect",   "Mutation rate",   "Population size", "Width of fitness function"))
+    }
+    
+    ggplot(dfSum,aes(y = SD, x = reorder(Parameter, -SD, na.rm = T), group = Parameter)) + 
+      geom_boxplot() +
+      #geom_violin() +
+      theme_bw() +
+      xlab("") +
+      ylab("Relative importance") +
+      theme(axis.text.x = element_text(angle = 90, hjust = 1), legend.position = c(0.7,0.8))
+    ggsave(paste0('../Figures/QuigleyPlotBySD_', a, '_', e, '.png'), width = 3, height = 6)
+  }
+}
+```
+
+
+### Combined Quigley-plots (Fig. 2)
+This is one of the main figures in the manusript, Fig. 2, that shows the relative importance of model parameters on intervention outcomes.
+```{r Combined Quigley plots, fig.dim=c(10,10), cache = T}
+FBlist <- list(FBcon, FBdiv, FBwoff, FBino, FBme, FBmr, FBpop, FBaIoC, FBS)
+names(FBlist) <- c('FBcon', 'FBdiv', 'FBwoff', 'FBino', 'FBme', 'FBmr', 'FBpop', 'FBaIoC', 'FBS')
+e <- 'with El Nino'
+ls <- list()
+ls<-lapply(seq_along(FBlist), FUN = function(x) {
+  n <- names(FBlist)[[x]]
+  y <- FBlist[[x]] %>% 
+    filter(GenNorm == 1,
+           #AGV == 'Scenario 1',
+           EN == e,
+           Population == 4) %>%
+    mutate(Parameter = n) %>%
+    rename(Values = 5) %>%
+    mutate(Values = as.factor(Values))
+  y
+})
+
+df <- do.call(rbind, ls)
+
+dfSum <- df %>%
+  group_by(Parameter, AGV2, no) %>%
+  summarise(Range = max(FB)-min(FB), SD = sd(FB)) %>%
+  mutate(Parameter = as.factor(Parameter))
+# levels(dfSum$Parameter)
+dfSum$Parameter <- factor(dfSum$Parameter, labels = c("El Nino phase", "Connectivity",  "Genetic diversity",  "Inoculum ratio",  "Mutation effect",   "Mutation rate",   "Population size",  "Broodstock size", "Width of fitness function"))
+
+ggplot(dfSum,aes(y = SD, x = reorder(Parameter, -SD, na.rm = T), group = interaction(AGV2, Parameter), color = AGV2)) + 
+  geom_boxplot() +
+  theme_bw() +
+  xlab("") +
+  ylab("Relative importance") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1), legend.position = c(0.7,0.8), legend.title = element_blank())
+```
+
+To get the figure for the model where the target population for intervention is population 3, run the same thing for sumsNewP3 (see section on loading the data). However, to make it easier, I made a function for creating this figure, which you just need to source in.
+
+```{r Combined Quigley plots 2, fig.dim=c(10,10), cache = T}
+source('../R scripts/Fig2Fun.R')
+
+#First we re-do it fo Population 4, this time without a legend so that the compound figure looks better.
+dfSum <- Fig2(dataset = sumsNew, P = 4)
+
+MF1 <- ggplot(dfSum,aes(y = SD, x = reorder(Parameter, -SD, na.rm = T), group = interaction(AGV2, Parameter), color = AGV2)) + 
+    # geom_boxplot() +
+    geom_point(alpha = 0.5, position = position_dodge(width = 0.75), size = 2) +
+    theme_bw() +
+    xlab("") +
+    ylab("Relative importance") +
+    scale_y_continuous(limits = c(0, 0.175)) +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1), legend.position = 'none')
+
+#Then we do it for Population 3.
+dfSumP3 <- Fig2(dataset = sumsNewP3, P = 3)
+
+MF2 <- ggplot(dfSumP3,aes(y = SD, x = reorder(Parameter, -SD, na.rm = T), group = interaction(AGV2, Parameter), color = AGV2)) + 
+  # geom_boxplot() +
+  geom_point(alpha = 0.5, position = position_dodge(width = 0.75), size = 2) +
+  theme_bw() +
+  xlab("") +
+  ylab("") +
+  scale_y_continuous(limits = c(0, 0.175)) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1), legend.position = c(0.8,0.8), legend.title = element_blank()) +
+  guides(color = guide_legend(override.aes = list(alpha = 1)))
+
+# and we combine the two figures, to create Fig. 2
+MF1 + MF2 + plot_annotation(tag_levels = 'A')
+ggsave('../Figures/Fig2.png', width = 8, height = 7, scale = 0.9, dpi = 300)
+```
+
+We hope you enjoyed this R-markdown. Any questions or comments, send an email to gergely.torda at jcu.edu.au
